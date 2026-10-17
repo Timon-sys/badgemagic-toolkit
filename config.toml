@@ -1,4 +1,4 @@
-# Example slots: python badgetool.py upload config.example.toml
+# Your slots: edit this, then  python badgetool.py upload config.toml  (or use the menu)
 [[message]]
 text = "HELLO"
 mode = "center"

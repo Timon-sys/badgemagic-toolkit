@@ -960,7 +960,7 @@ def pick_channel():
 def menu_upload():
     path = os.path.join(HERE, "config.toml")
     if not os.path.exists(path):
-        print("no config.toml yet: copy config.example.toml to config.toml and edit it")
+        print(f"{path} is missing; it comes with the repo (two example messages)")
         return
     cmd_upload(ns(file=path, font="thin"))
 

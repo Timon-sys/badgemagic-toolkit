@@ -47,7 +47,6 @@ status, the clock and streaming.
 ## Quick start
 
 ```sh
-cp config.example.toml config.toml  # your slots; the menu's "upload config.toml" uses it
 python badgetool.py                 # interactive menu: pick USB / BLE, then a badge
 python badgetool.py list            # badges on USB
 python badgetool.py status          # everything the badge reports
@@ -92,8 +91,9 @@ interactive menu or the phone app, before you scan.
 
 ### Config file
 
-The format is the same as the official `badgemagic` CLI's (see
-`config.example.toml`):
+Your slots live in `config.toml`, which comes with two example messages.
+Edit it, then run `python badgetool.py upload config.toml` or use the menu.
+The format is the same as the official `badgemagic` CLI's:
 
 ```toml
 [[message]]
@@ -138,6 +138,11 @@ firmware.
   nobody can make a copy of it, only of the data EEPROM. The patched
   firmware does everything the factory one does and works with the Badge
   Magic app.
+- **The first time into ISP mode can be fiddly.** On factory firmware the
+  chip has to lose power completely, which on badges with a soldered battery
+  means some soldering or upstream's capacitor trick (see [Flashing](#flashing)).
+  After that, the patched firmware enters ISP mode with a 2 to 3 second
+  button press.
 - **A failed or wrong flash can be redone.** The ISP bootloader sits in its
   own protected area of the chip that flashing doesn't touch. If the badge
   shows garbage or nothing at all after a flash, enter ISP mode again and
@@ -185,13 +190,25 @@ and the second-to-last row flickers, flash `pb6`; nothing breaks either way.
 3. Run `python badgetool.py flash normal` (or `flash pb6`). It waits up to
    5 minutes for a badge in ISP mode.
 4. Enter ISP mode:
-   - **Factory firmware:** switch the badge off (or disconnect the battery),
-     then hold the button **nearest the USB port** while plugging in USB.
-     If that doesn't work, upstream describes a second method (shorting C3)
-     in its README.
-   - **Patched firmware already on it:** with USB plugged in, hold that same
-     button for more than 2 seconds. On the way it may jump to the menu;
-     keep holding.
+   - **Factory firmware (the hard part, only once):** the chip has to
+     start up from no power at all while you hold the button **nearest the
+     USB port**. So it has to lose power completely: hold the button, cut
+     the power, then plug in USB with the button still held. With the battery
+     connected, switching the badge off is often not enough, because the
+     battery keeps the chip powered. Ways to cut it:
+     - unplug the battery, if it has a connector;
+     - upstream's method: hold the button and briefly short capacitor C3
+       (see upstream's README for photos);
+     - with a soldered battery: desolder or cut one battery lead.
+
+     > ⚠️ **Never short the battery itself.** We got one soldered-battery
+     > badge into ISP mode by shorting it for a split second while holding
+     > the button. It worked, but a shorted LiPo cell can overheat, catch
+     > fire or burst. Use one of the methods above.
+   - **Patched firmware already on it (every flash after the first):** with
+     the badge connected over USB, hold the button nearest the USB port for
+     2 to 3 seconds. No replugging, no tools. On the way it may jump to the
+     menu; keep holding.
 
    ISP mode shows a single lit pixel near the middle and lasts about 10
    seconds, and `badgetool.py` starts flashing as soon as it sees the badge.
