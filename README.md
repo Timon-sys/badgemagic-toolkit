@@ -1,5 +1,11 @@
 # badgemagic toolkit
 
+> **A note before you dive in:** this is my take on these badges: the things
+> I liked, wanted, and thought were cool to build. It's not a polished
+> product or an official fork. Treat it as an example sketch to build on:
+> take what's useful, change what isn't. That's also why all the small
+> scripts from along the way are included, not just the finished tool.
+
 A single Python tool and a patched firmware for the cheap 44×11 LED name badges
 that ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
 
@@ -12,8 +18,8 @@ that ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app
   commands.
 - **`ls32/ls32_image.py`** shows static images on the older LS32 badges.
 
-Text is drawn in the same font as the official `badgemagic` CLI, so it looks
-identical whether you upload it over USB or BLE.
+Text uses the same thin font as the official `badgemagic` CLI, and looks the
+same over USB and BLE.
 
 ## Supported badges
 
@@ -28,10 +34,18 @@ list` tells you which kind is plugged in by its USB name:
 | LS32 (older, USB only) | "LS32 Custm HID" | text and images over USB |
 
 All of them show up as USB device `0416:5020` and share the legacy "wang"
-upload format, the same one the app uses. If `list` says `unknown`, please
-open an issue with its output (it shows the USB strings).
-Only the patched firmware also speaks the `ng` protocol, which handles settings,
-status, the clock and streaming.
+upload format, the same one the app uses. Only the patched firmware also
+speaks the `ng` protocol, which handles settings, status, the clock and
+streaming. If `list` says `unknown`, please open an issue with its output
+(it shows the USB strings).
+
+| CH582 badge (USB-C, 2 buttons) | LS32 badge (micro-USB) |
+|---|---|
+| ![CH582 board in its case](pictures/ch582-board-overview.jpg) | ![LS32 board](pictures/ls32-microusb-board.jpg) |
+| ![CH582M chip close-up](pictures/ch582-chip-closeup.jpg) | ![LS32 chip close-up](pictures/ls32-microusb-chip.jpg) |
+
+The CH582 board in these pictures is revision `B1144C_240525`. Look for the
+`CH582M` marking on the chip.
 
 ## Requirements
 
@@ -134,12 +148,12 @@ firmware.
 
 ### Before you flash
 
-- **There is no way back to the factory firmware.** It is read-protected, so
-  nobody can make a copy of it, only of the data EEPROM. The patched
+- **There is no way back to the factory firmware.** It's read-protected, so
+  it can't be backed up (only the settings memory can). The patched
   firmware does everything the factory one does and works with the Badge
   Magic app.
 - **The first time into ISP mode can be fiddly.** On factory firmware the
-  chip has to lose power completely, which on badges with a soldered battery
+  chip has to lose power completely. The battery is soldered on, so that
   means some soldering or upstream's capacitor trick (see [Flashing](#flashing)).
   After that, the patched firmware enters ISP mode with a 2 to 3 second
   button press.
@@ -176,7 +190,8 @@ They are also attached to the
 | `badgemagic-ch582-2key-pb6.bin` | `pb6` | boards where LED line T is wired to PB6 |
 
 Not sure which one you need? Flash `normal` first. If two columns stay dark
-and the second-to-last row flickers, flash `pb6`; nothing breaks either way.
+and the second-to-last row flickers (there's a picture under
+[Fixes](#fixes)), flash `pb6`; nothing breaks either way.
 
 ### Flashing
 
@@ -190,21 +205,36 @@ and the second-to-last row flickers, flash `pb6`; nothing breaks either way.
 3. Run `python badgetool.py flash normal` (or `flash pb6`). It waits up to
    5 minutes for a badge in ISP mode.
 4. Enter ISP mode:
-   - **Factory firmware (the hard part, only once):** the chip has to
-     start up from no power at all while you hold the button **nearest the
-     USB port**. So it has to lose power completely: hold the button, cut
-     the power, then plug in USB with the button still held. With the battery
-     connected, switching the badge off is often not enough, because the
-     battery keeps the chip powered. Ways to cut it:
-     - unplug the battery, if it has a connector;
-     - upstream's method: hold the button and briefly short capacitor C3
-       (see upstream's README for photos);
-     - with a soldered battery: desolder or cut one battery lead.
+   - **Factory firmware (the hard part, only once):** the chip has to start
+     up from no power at all while you hold the button **nearest the USB
+     port**. Switching the badge off isn't enough, because the battery
+     (which is soldered on) keeps the chip powered. Two ways:
+     - desolder one battery lead, plug in USB with the button held, flash,
+       and solder the lead back. The clean way.
+     - upstream's quicker method: with USB connected and the button held,
+       briefly short capacitor **C3** with tweezers or a wire. C3 sits on
+       the power rail, so the short drops the voltage far enough to reset
+       the chip: a "dirty power cycle". Upstream calls it less reliable
+       than removing the battery, and shorting a neighbouring part by
+       accident can damage the board, so it's not for beginners. On the
+       revision in the picture below (`B1144C_240525`) C3 is next to the
+       RESET button; on other revisions it sits elsewhere. Details in
+       upstream's [CH582.md](https://github.com/fossasia/badgemagic-firmware/blob/master/CH582.md).
 
-     > ⚠️ **Never short the battery itself.** We got one soldered-battery
-     > badge into ISP mode by shorting it for a split second while holding
-     > the button. It worked, but a shorted LiPo cell can overheat, catch
-     > fire or burst. Use one of the methods above.
+     The **RESET button doesn't work** for this: holding the button and
+     pressing RESET only restarts the firmware (we tried it). It resets
+     the chip without cutting power, and the boot pin is only checked on a
+     real power-up.
+
+     > ⚠️ **Never short the battery itself.** We got one badge into ISP
+     > mode by shorting it for a split second while holding the button. It
+     > worked, but a shorted LiPo cell can overheat, catch fire or burst.
+     > Use one of the methods above.
+
+     | C3 and RESET | KEY2 (nearest USB) and the soldered battery leads |
+     |---|---|
+     | ![C3, RESET and board revision](pictures/ch582-board-reset-c3-revision.jpg) | ![USB-C, KEY1, KEY2 and battery leads](pictures/ch582-board-usbc-buttons-battery.jpg) |
+
    - **Patched firmware already on it (every flash after the first):** with
      the badge connected over USB, hold the button nearest the USB port for
      2 to 3 seconds. No replugging, no tools. On the way it may jump to the
@@ -217,7 +247,8 @@ and the second-to-last row flickers, flash `pb6`; nothing breaks either way.
 
 wchisp only rewrites the program flash, so in our tests the slots and
 settings survived a reflash. The first flash over factory firmware starts
-with default settings, because this firmware keeps them somewhere else.
+with default settings, because this firmware stores them in a different
+place than the factory one.
 
 ### Fixes
 
@@ -225,6 +256,8 @@ with default settings, because this firmware keeps them somewhere else.
   wired to PB6 instead of the upstream pin. The symptom is two dark columns
   and the second-to-last row alternating between lit and dead. That's the
   `pb6` build (`LED_T_PB6=1`).
+
+  ![All LEDs on with the wrong pin: a dark column on the right and a broken second-to-last row](pictures/badge-wrong-led-pin-before-fix.jpg)
 - **Settings lost or overlapping the game highscore:** the config moved to
   `0x7C00`. It is now erased before it is written and goes through an aligned
   buffer, and its CRC is seeded so that an all-zero block no longer counts as
@@ -236,6 +269,8 @@ with default settings, because this firmware keeps them somewhere else.
   reboot while charging no longer saves zeros.
 - **Bluetooth pairing menu:** leaving it no longer leaves the BLE animation
   fighting with the menu.
+
+  ![The badge menu with its BT pairing animation](pictures/badge-menu-animation-bt-pairing.jpg)
 - **Random bright pixel blips while redrawing:** the framebuffer is locked
   while it is cleared and redrawn, including in the games.
 - **Bright blips when saving or during Bluetooth traffic:** a flash write
@@ -247,11 +282,14 @@ with default settings, because this firmware keeps them somewhere else.
   stream is active but don't draw over it, and the badge returns to the
   previous screen when the stream stops.
 - **Clock lost on every boot:** the RTC is only initialised when it holds no
-  valid date, so the time survives a power-off with the button.
+  valid date, so the time survives reboots and a power-off with the button.
 
 ### Additions
 
 - The charging screen shows the battery voltage (calibrated ADC).
+
+  ![Charging screen with the battery voltage](pictures/badge-charging-screen-voltage.jpg)
+
 - `ng` misc commands: set time (2), battery reply `BAT` (3), status reply
   `STA` (4).
 
@@ -312,8 +350,8 @@ renaming a badge keeps it compatible with the app.
   slots (or one specific slot) and menu from the PC, over USB and BLE. Today
   only the buttons can do that.
 - **The clock drifts a lot:** the badge has no 32 kHz crystal, so the clock
-  runs on the chip's internal RC oscillator. Measured on one badge: about 10 %
-  slow (it loses 1 s every 10 s), sometimes fast right after a reboot. The
+  runs on the chip's internal RC oscillator. Measured on one badge: it drifts
+  by about 10 % (1 s every 10 s), sometimes slow, sometimes fast. The
   calibration against the main crystal (`Calibration_LSI`) apparently doesn't
   hold. Set the clock with `badgetool.py time` when you need it; fixing it
   would mean recalibrating periodically or correcting the RTC in software.
@@ -323,6 +361,10 @@ renaming a badge keeps it compatible with the app.
 
 ## Credits and licences
 
+- Made by me together with
+  [Claude](https://claude.com/claude-code) (Anthropic's AI assistant): the
+  firmware debugging, the patches, `badgetool.py` and this README were worked
+  out in pair-programming sessions, with every change tested on real badges.
 - This project is licensed under [Apache-2.0](LICENSE), the same as the
   firmware it is based on.
 - Firmware: [FOSSASIA badgemagic-firmware](https://github.com/fossasia/badgemagic-firmware)

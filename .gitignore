@@ -23,3 +23,4 @@ __pycache__/
 # upstream clone with our changes: shipped as the .diff + firmware/*.bin
 badgemagic-firmware/
 tools/
+pictures-originals/
