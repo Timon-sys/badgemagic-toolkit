@@ -21,6 +21,56 @@ that ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app
 Text uses the same thin font as the official `badgemagic` CLI, and looks the
 same over USB and BLE.
 
+## What's different with the patched firmware
+
+What you notice, and what you can do now that you couldn't before:
+
+- **A display that doesn't flicker.** FOSSASIA's firmware refreshes
+  the LEDs at about 45 Hz, and you can see the columns sweep across.
+  The patched firmware runs at about **91 Hz**, twice as fast, and it's
+  steady. The random bright pixel blips while redrawing, saving or using
+  Bluetooth are gone too.
+- **Always-on Bluetooth that actually works.** See [below](#always-on-bluetooth).
+- **Control everything from the PC, over USB or Bluetooth.** `badgetool.py`
+  reads the battery voltage and the badge's settings, sets the clock,
+  brightness and Bluetooth name, uploads text and images, and streams live
+  pictures: about 60 fps over USB, and over Bluetooth about 20 fps with the
+  [fast-BLE build](#which-file) (FOSSASIA's firmware: about 2 fps).
+- **The phone app works.** Uploads from the Badge Magic app were rejected
+  unless you had switched on a PIN first; now they just work. Renaming the
+  badge doesn't break the app either.
+- **Settings and the clock stay put.** Settings survive reboots and
+  reflashes, and the clock survives reboots and switching off. It
+  [drifts a lot](#ideas--not-done-yet), though, so set it now and then
+  (`badgetool.py time`).
+- **The battery voltage on the charging screen**, and a charging screen that
+  lets the badge finish booting after 5 seconds instead of waiting for a
+  button press forever.
+- **Calmer buttons.** The button nearest USB steps one slot per press (the
+  slots no longer start cycling on their own), a long press on the other
+  button changes brightness, and after an upload the badge shows your slots
+  straight away.
+
+### Always-on Bluetooth
+
+On FOSSASIA's firmware the badge is only visible over Bluetooth while you
+sit in the BT-PAIRING menu, and its "always on" setting never actually
+switched advertising on. With the patched firmware and always-on enabled
+(the default), the badge advertises from the moment it starts, every 60 to
+125 ms, while it shows your slots, the clock or anything else. The phone
+app or `badgetool.py --ble` can connect at any time without you touching the
+badge.
+
+- Switch it with `python badgetool.py ble on` / `ble off` (the badge
+  reboots to apply it).
+- While something is connected, the badge stops advertising: it takes one
+  connection at a time. If a scan doesn't find it, close the other
+  connection (the phone app, or the `badgetool.py` menu).
+- It costs some battery even when nothing is connected; we haven't measured
+  how much. Turn it off for long days on battery.
+- The Bluetooth name shows in scans; the app finds the badge by its service
+  ID, so any name works with the app.
+
 ## Supported badges
 
 These badges are sold under many names, in different case and LED colours, so
@@ -84,7 +134,7 @@ python badgetool.py text "Hello" "Second slot" --mode center
 | `image pic.png [--invert]` | static image in slot 1; dark pixels light up, `--invert` for light ones |
 | `stream white\|off\|pic.png` | live picture without touching the slots |
 | `reset` / `off` | reboot / power off |
-| `flash pb6` / `normal` / `FILE.bin` | flashes the patched firmware (badge in ISP mode) |
+| `flash normal` / `pb6` / `normal-fastble` / `pb6-fastble` / `FILE.bin` | flashes the patched firmware (badge in ISP mode, see [Which file](#which-file)) |
 
 Scroll modes: `left right up down center fast drop curtain laser`. Speed: `0-7`.
 
@@ -184,14 +234,28 @@ Ready-to-flash builds are in [`firmware/`](firmware/), with checksums in
 They are also attached to the
 [releases](https://github.com/Timon-sys/badgemagic-toolkit/releases).
 
-| File | `flash` name | For |
-|---|---|---|
-| `badgemagic-ch582-2key.bin` | `normal` | most boards |
-| `badgemagic-ch582-2key-pb6.bin` | `pb6` | boards where LED line T is wired to PB6 |
+Two choices make four files:
 
-Not sure which one you need? Flash `normal` first. If two columns stay dark
-and the second-to-last row flickers (there's a picture under
-[Fixes](#fixes)), flash `pb6`; nothing breaks either way.
+- **LED wiring:** `normal` for most boards, `pb6` for boards where LED line T
+  is wired to PB6. Not sure? Flash `normal` first. If two columns stay dark
+  and the second-to-last row flickers (there's a picture under
+  [Fixes](#fixes)), flash `pb6`; nothing breaks either way.
+- **Bluetooth speed:** the `fastble` builds ask for a 15 to 30 ms connection
+  interval and use a bigger packet size (MTU 96), so live streaming over
+  Bluetooth runs at about 20 fps instead of about 2. That costs more battery,
+  but only while something is connected. Uploads, the phone app and
+  everything else work the same in both.
+
+| File | `flash` name | LED wiring | Bluetooth | Tested on a badge |
+|---|---|---|---|---|
+| `badgemagic-ch582-2key.bin` | `normal` | normal | standard | no, builds only |
+| `badgemagic-ch582-2key-pb6.bin` | `pb6` | PB6 | standard | yes, incl. a 150-frame Bluetooth stress test |
+| `badgemagic-ch582-2key-fastble.bin` | `normal-fastble` | normal | fast | no, builds only |
+| `badgemagic-ch582-2key-pb6-fastble.bin` | `pb6-fastble` | PB6 | fast | yes, two badges, incl. the phone app (21 to 34 fps) |
+
+The `normal` builds differ from the `pb6` ones only in that one LED pin, so
+the risk is small, but they haven't run on real hardware yet. Reports
+welcome.
 
 ### Flashing
 
@@ -252,6 +316,42 @@ place than the factory one.
 
 ### Fixes
 
+- **Refresh rate halved upstream:** commit `4e556ab` switched the LED scan
+  from 2 to 4 phases per column (for 4 brightness levels), which doubled the
+  steps per frame (44 to 88) but kept the 4 kHz timer, so a frame took 22 ms
+  (about 45 Hz) and the scan was visible. The timer now runs at 8 kHz: 11 ms
+  per frame, about 91 Hz.
+- **Phone app uploads rejected:** the legacy BLE upload refused data as "not
+  authed" unless the PIN feature was switched on (upstream issues #190 and
+  #198). The check now only applies when the PIN is on.
+- **Always-on Bluetooth did nothing:** advertising was only ever enabled by
+  the BT-PAIRING menu, so the setting could only switch off something that
+  was already off. It is now enabled at startup, and always-on is the
+  default.
+- **`ng` commands only over Bluetooth:** the USB HID and serial interfaces
+  now feed the same command parser (framed as `'N' 'G' len payload`), and
+  everything else still goes to the legacy upload, so the official CLI keeps
+  working. This is what lets `badgetool.py` do everything over USB.
+- **USB upload state never reset:** `legacy_usb_rx()` didn't reset its
+  length counters after a transfer, so a following upload could be misread.
+- **LEDs stuck on after switching off:** the LED timer kept running into
+  power-off, leaving a column lit at full brightness. It is stopped first now.
+- **Slots cycling on their own:** after the last slot, the button re-armed
+  automatic cycling. Now it steps one slot per press and wraps around.
+- **Badge stuck in the menu after an upload,** behind a "BLUETOOTH OFF"
+  screen. It now shows the new slots straight away.
+- **Startup animation:** off by default (`badgetool.py splash on` brings it
+  back), so the badge is ready at once.
+- **Bluetooth crash under load:** `ng_notify()` freed the notification
+  buffer even after the Bluetooth stack had taken it over. That double free
+  corrupted the Bluetooth heap: with notifications on and frames streamed
+  fast, the badge's Bluetooth and buttons froze.
+- **Slow Bluetooth** (`fastble` builds only): the badge allowed connection intervals up to 625 ms and
+  never asked for less (its request went to the wrong connection), the MTU
+  of 64 split every 89-byte stream frame into a 3-round-trip write, and the
+  `ng` characteristic didn't allow writes without response. Now it asks for
+  15 to 30 ms after connecting, uses MTU 96 and accepts write-without-response:
+  live streaming went from about 2 to about 20 fps.
 - **Dead columns / flickering row:** on some board revisions LED line T is
   wired to PB6 instead of the upstream pin. The symptom is two dark columns
   and the second-to-last row alternating between lit and dead. That's the
@@ -297,13 +397,16 @@ place than the factory one.
 
 You don't need to build anything to use the files in `firmware/`. To build
 them yourself, get upstream at commit `b2137f0` and apply
-[`badgemagic-custom-patches.diff`](badgemagic-custom-patches.diff):
+[`badgemagic-custom-patches.diff`](badgemagic-custom-patches.diff). For the
+`fastble` builds, apply [`badgemagic-fast-ble.diff`](badgemagic-fast-ble.diff)
+on top:
 
 ```sh
 git clone https://github.com/fossasia/badgemagic-firmware
 cd badgemagic-firmware
 git checkout b2137f0
 git apply ../badgemagic-custom-patches.diff
+git apply ../badgemagic-fast-ble.diff       # only for the fastble builds
 ```
 
 The toolchain is `riscv-none-embed-gcc` 8.2 (MounRiver / xPack) plus `make`,
@@ -316,7 +419,7 @@ BUILD_DIR=usb-c-2key-t6 KEY_COUNT=2 LED_T_PB6=1 make   # pb6 build
 ```
 
 The result is `<BUILD_DIR>/badgemagic-ch582.bin`, and a clean checkout with
-the patch builds byte-identical copies of the files in `firmware/`. Flash it
+the patches builds byte-identical copies of the files in `firmware/`. Flash it
 with `badgetool.py flash path/to/badgemagic-ch582.bin`.
 
 ## Protocol notes
@@ -342,10 +445,11 @@ renaming a badge keeps it compatible with the app.
 - **Status and battery over BLE:** the replies currently go out over USB HID
   only. Sending them as `f056` notifications would give BLE the full
   `status` (voltage, clock, settings) instead of just the battery percentage.
-- **Faster BLE streaming:** live pictures over BLE run at about 2 fps,
-  because the firmware allows a connection interval of up to 625 ms.
-  Lowering it to 20-50 ms should give roughly 10-30 fps, at some battery cost
+- **Smoother BLE streaming:** frames arrive on the connection-interval grid
+  (Windows picks 30 ms), so streams at 15 or 20 fps jitter by a slot now and
+  then. A 7.5 to 15 ms interval would make it smoother, at more battery cost
   while connected.
+- **Battery cost of always-on Bluetooth:** not measured yet.
 - **Remote mode switching:** a command to switch between clock, stopwatch,
   slots (or one specific slot) and menu from the PC, over USB and BLE. Today
   only the buttons can do that.

@@ -1,0 +1,119 @@
+diff --git a/src/ble/peripheral.c b/src/ble/peripheral.c
+index 7f657ae..2e63302 100644
+--- a/src/ble/peripheral.c
++++ b/src/ble/peripheral.c
+@@ -21,8 +21,13 @@ typedef struct
+ #define MIN_ADV_INTERVAL    100 // Advertising interval (units of 0.625ms)
+ #define MAX_ADV_INTERVAL    200 // Advertising interval (units of 0.625ms)
+ 
+-#define MIN_CONN_INTERVAL   20 // Connection interval (units of 1.25ms)
+-#define MAX_CONN_INTERVAL   100 // Connection interval (units of 1.25ms)
++/* 15-30 ms. Upstream advertised 7.5-625 ms and never asked for anything on
++ * the live link, so Windows picked a slow interval and BLE streaming ran at
++ * ~2 fps. Only costs power while connected. */
++#define MIN_CONN_INTERVAL   12 // Connection interval (units of 1.25ms)
++#define MAX_CONN_INTERVAL   24 // Connection interval (units of 1.25ms)
++
++#define SBP_PARAM_UPDATE_EVT 0x0001
+ 
+ #define CONN_TIMEOUT        100 // Supervision timeout (units of 10ms)
+ 
+@@ -72,12 +77,6 @@ static void link_onEstablished(gapRoleEvent_t *pe)
+ 	if(conn_list.connHandle != GAP_CONNHANDLE_INIT) {
+ 		// Only allow 1 connection, so the new connection will be dropped:
+ 		GAPRole_TerminateLink(e->connectionHandle);
+-		GAPRole_PeripheralConnParamUpdateReq(e->connectionHandle,
+-					MIN_CONN_INTERVAL,
+-					MAX_CONN_INTERVAL,
+-					SLAVE_LATENCY,
+-					CONN_TIMEOUT,
+-					taskid);
+ 		return;
+ 	}
+ 	conn_list.connHandle = e->connectionHandle;
+@@ -85,6 +84,10 @@ static void link_onEstablished(gapRoleEvent_t *pe)
+ 	conn_list.connSlaveLatency = e->connLatency;
+ 	conn_list.connTimeout = e->connTimeout;
+ 	enable_advertising(FALSE);
++	/* Ask for the faster interval once service discovery has settled, like
++	 * WCH's peripheral sample. (Upstream sent this request to the second
++	 * link it had just dropped, never to the live one.) */
++	tmos_start_task(taskid, SBP_PARAM_UPDATE_EVT, SBP_PARAM_UPDATE_DELAY);
+ }
+ 
+ static void link_onTerminated(gapRoleEvent_t *pe)
+@@ -172,6 +175,17 @@ static uint16 peripheral_task(uint8 task_id, uint16 events)
+ 		return (events ^ SYS_EVENT_MSG);
+ 	}
+ 
++	if(events & SBP_PARAM_UPDATE_EVT) {
++		if(conn_list.connHandle != GAP_CONNHANDLE_INIT)
++			GAPRole_PeripheralConnParamUpdateReq(conn_list.connHandle,
++						MIN_CONN_INTERVAL,
++						MAX_CONN_INTERVAL,
++						SLAVE_LATENCY,
++						CONN_TIMEOUT,
++						taskid);
++		return (events ^ SBP_PARAM_UPDATE_EVT);
++	}
++
+ 	return 0;
+ }
+ 
+@@ -227,8 +241,8 @@ static void gap_init()
+ {
+ 	GAPRole_PeripheralInit();
+ 
+-	uint16_t min_interval = 6;
+-	uint16_t max_interval = 500;
++	uint16_t min_interval = MIN_CONN_INTERVAL;
++	uint16_t max_interval = MAX_CONN_INTERVAL;
+ 
+ 	// Set the GAP Role Parameters
+ 	setup_scan_rsp(badge_cfg.ble_devname, 20);
+diff --git a/src/ble/profile/ng.c b/src/ble/profile/ng.c
+index 1c4789e..d8f01dc 100644
+--- a/src/ble/profile/ng.c
++++ b/src/ble/profile/ng.c
+@@ -15,7 +15,8 @@ static uint8_t TxCharVal[256];
+ static uint16_t TxLen;
+ 
+ static const uint16_t RxCharUUID = 0xF057;
+-static uint8_t RxCharProps = GATT_PROP_WRITE;
++/* write-without-response lets a host stream frames back to back */
++static uint8_t RxCharProps = GATT_PROP_WRITE | GATT_PROP_WRITE_NO_RSP;
+ #define RxCharVal TxCharVal
+ static gattCharCfg_t TxCCCD[1];
+ 
+diff --git a/src/ble/setup.c b/src/ble/setup.c
+index d4cd66a..9e80c79 100644
+--- a/src/ble/setup.c
++++ b/src/ble/setup.c
+@@ -6,11 +6,13 @@
+ #include "CH58x_common.h"
+ 
+ #ifndef BLE_BUFF_LEN
+-// MTU = 64 but clients should request new MTU, otherwise default will be 23.
+-// Do not raise this without also growing BLE_MEMHEAP_SIZE: buffer memory is
+-// BLE_BUFF_NUM * BLE_BUFF_LEN (22 * 68 here) out of a 6 KiB heap, and going
+-// to 128 starved it and stopped connections from establishing.
+-#define BLE_BUFF_LEN (64 + 4)
++// MTU = 96 but clients should request new MTU, otherwise default will be 23.
++// 96 so a whole ng stream frame (1 + 88 bytes) fits in one write instead of
++// a 3-round-trip long write. Do not raise this without also growing
++// BLE_MEMHEAP_SIZE: buffer memory is BLE_BUFF_NUM * BLE_BUFF_LEN (22 * 100
++// here), and 128 with the old 6 KiB heap starved it and stopped connections
++// from establishing.
++#define BLE_BUFF_LEN (96 + 4)
+ #endif
+ 
+ #ifndef BLE_TX_NUM_EVENT
+@@ -23,7 +25,7 @@
+ #endif
+ 
+ #ifndef BLE_MEMHEAP_SIZE
+-#define BLE_MEMHEAP_SIZE                    (1024 * 6)
++#define BLE_MEMHEAP_SIZE                    (1024 * 7)
+ #endif
+ 
+ #ifndef CENTRAL_MAX_CONNECTION

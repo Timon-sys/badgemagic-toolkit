@@ -15,7 +15,7 @@ Run without arguments for an interactive menu, or use a command:
   python badgetool.py image pic.png [--invert]  static image into slot 1 (dark = lit)
   python badgetool.py stream white|off|pic.png  live picture (custom firmware)
   python badgetool.py reset | off               reboot / power off (custom firmware)
-  python badgetool.py flash pb6|normal|X.bin    flash the custom firmware (ISP mode)
+  python badgetool.py flash pb6|normal|X.bin    flash the custom firmware (ISP mode; -fastble variants too)
 
 Channel (default USB HID):
   --ble                 scan and pick a badge over Bluetooth
@@ -51,9 +51,11 @@ WCHISP = next((c for c in (os.path.join(HERE, "tools", "wchisp-win-x64", "wchisp
                            os.path.join(HERE, "tools", "wchisp")) if os.path.isfile(c)),
               None) or shutil.which("wchisp")
 # prebuilt firmware: pb6 = boards with LED line T on PB6 (dead columns and a
-# flickering row on the normal build), normal = everything else
+# flickering row on the normal build), normal = everything else; -fastble =
+# 15-30 ms BLE interval + MTU 96 for ~20 fps streaming (more battery while connected)
 FIRMWARE = {v: os.path.join(HERE, "firmware", f"badgemagic-ch582-2key{s}.bin")
-            for v, s in (("pb6", "-pb6"), ("normal", ""))}
+            for v, s in (("normal", ""), ("pb6", "-pb6"),
+                         ("normal-fastble", "-fastble"), ("pb6-fastble", "-pb6-fastble"))}
 
 VID, PID = 0x0416, 0x5020
 COLS, ROWS = 44, 11
@@ -1003,7 +1005,8 @@ def _menu():
         ("full white test screen", lambda: cmd_stream(ns(what="white"))),
         ("stop streaming", lambda: cmd_stream(ns(what="off"))),
         ("reboot", lambda: cmd_reset(ns())),
-        ("flash firmware", lambda: cmd_flash(ns(firmware=ask("pb6 or normal build: ", ("pb6", "normal"))))),
+        ("flash firmware", lambda: cmd_flash(ns(firmware=ask("build (" + " / ".join(FIRMWARE) + "): ",
+                                                            tuple(FIRMWARE))))),
     ]
     while True:
         print()
@@ -1085,7 +1088,7 @@ def main():
     s.add_argument("--invert", action="store_true", help="light pixels light up (default: dark pixels do)"); s.set_defaults(f=cmd_stream)
     sub.add_parser("reset").set_defaults(f=cmd_reset)
     sub.add_parser("off").set_defaults(f=cmd_off)
-    s = sub.add_parser("flash"); s.add_argument("firmware", metavar="pb6|normal|FILE.bin",
+    s = sub.add_parser("flash"); s.add_argument("firmware", metavar="normal|pb6|normal-fastble|pb6-fastble|FILE.bin",
                                                 help="prebuilt variant from firmware/, or your own build")
     s.set_defaults(f=cmd_flash)
     a = p.parse_args()
