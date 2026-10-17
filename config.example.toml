@@ -1,0 +1,11 @@
+# Example slots: python badgetool.py upload config.example.toml
+[[message]]
+text = "HELLO"
+mode = "center"
+
+[[message]]
+text = "scrolling text"
+mode = "left"
+speed = 6
+border = false
+blink = false

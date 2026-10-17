@@ -1,0 +1,1182 @@
+diff --git a/Makefile b/Makefile
+index a360b59..b4a2b7d 100644
+--- a/Makefile
++++ b/Makefile
+@@ -157,6 +157,9 @@ endif
+ ifeq ($(HARDWARE_REV1), 1)
+ CFLAGS += -DHARDWARE_REV1=$(HARDWARE_REV1)
+ endif
++ifeq ($(LED_T_PB6), 1)
++CFLAGS += -DLED_T_PB6=1
++endif
+ ifeq ($(HARDWARE_REV3), 1)
+ CFLAGS += -DHARDWARE_REV3=$(HARDWARE_REV3)
+ endif
+diff --git a/src/ble/setup.c b/src/ble/setup.c
+index 5687d5b..d4cd66a 100644
+--- a/src/ble/setup.c
++++ b/src/ble/setup.c
+@@ -6,7 +6,10 @@
+ #include "CH58x_common.h"
+ 
+ #ifndef BLE_BUFF_LEN
+-// MTU = 64 but clients should request new MTU, otherwise default will be 23
++// MTU = 64 but clients should request new MTU, otherwise default will be 23.
++// Do not raise this without also growing BLE_MEMHEAP_SIZE: buffer memory is
++// BLE_BUFF_NUM * BLE_BUFF_LEN (22 * 68 here) out of a 6 KiB heap, and going
++// to 128 starved it and stopped connections from establishing.
+ #define BLE_BUFF_LEN (64 + 4)
+ #endif
+ 
+@@ -54,7 +57,14 @@ void tmos_clockInit(void)
+ 	sys_safe_access_disable();
+ 	lsi_calib();
+ 
+-	RTC_InitTime(2020, 1, 1, 0, 0, 0);
++	/* The RTC sits in the always-on domain and survives resets and shutdown
++	 * as long as the battery holds, so only reset it when it is unset (after
++	 * power-on it counts up from 2020-01-01). Re-initialising it on every
++	 * boot threw the clock back to 00:00 each restart. */
++	uint16_t y, mo, d, h, mi, s;
++	RTC_GetTime(&y, &mo, &d, &h, &mi, &s);
++	if (y < 2025)
++		RTC_InitTime(2020, 1, 1, 0, 0, 0);
+ 	TMOS_TimerInit(0);
+ }
+ 
+diff --git a/src/config.c b/src/config.c
+index 82b0650..e2272f7 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -3,6 +3,7 @@
+  * invalid values which will make the badge broke.
+  */
+ #include "config.h"
++#include "leddrv.h"
+ #include "resource.h"
+ #include "res/foss-asia-2.xbm"
+ #include "debug.h"
+@@ -12,14 +13,34 @@
+ #include <stdlib.h>
+ 
+ #define CFG_SIZE sizeof(badge_cfg_t)
+-#define CFG_DEF_FLASH_OFFS (EEPROM_MAX_SIZE - CFG_SIZE - 1) // Default offset
++/* Upstream put the config at the very end (0x7ED7..0x7FFE). That overlapped
++ * the game highscore at 0x7FF8, whose page erase wiped the config tail, and
++ * the config itself was written without an erase, so every save ANDed the new
++ * bits into the old ones until everything read back as 0 - which the plain
++ * CRC (init 0) accepted as valid: name "", always-on off, brightness 0.
++ * Now: own page-aligned area, erase before write, CRC seeded so all-zero and
++ * all-0xFF data never validate. */
++#define CFG_DEF_FLASH_OFFS (0x7C00)
++#define CFG_AREA_SIZE      (((CFG_SIZE) + EEPROM_PAGE_SIZE - 1) / EEPROM_PAGE_SIZE * EEPROM_PAGE_SIZE)
++#define CFG_CRC_SEED       (0xA5)
++
++/* EEPROM_READ/WRITE need 4-byte aligned buffers; badge_cfg_t is packed. */
++static uint32_t cfg_buf[(CFG_SIZE + 3) / 4];
++
++static uint8_t cfg_crc(uint8_t *a, int len)
++{
++	uint8_t crc = CFG_CRC_SEED;
++	for (int i = 0; i < len; i++)
++		crc = crc8_ccitt_update(crc, a[i]);
++	return crc;
++}
+ 
+ badge_cfg_t badge_cfg;
+ 
+ /* In case of first time firmware upgrading */
+ void cfg_fallback()
+ {
+-	badge_cfg.ble_always_on = 0;
++	badge_cfg.ble_always_on = 1;
+ 	memcpy(badge_cfg.ble_devname, "LED Badge Magic\0\0\0\0", 20);
+ 	/* OEM app testing: */
+ 	// memcpy(badge_cfg.ble_devname, "LSLED\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 20);
+@@ -27,7 +48,7 @@ void cfg_fallback()
+ 	badge_cfg.led_brightness = 0;
+ 	badge_cfg.led_scan_freq = 2000;
+ 
+-	badge_cfg.splash_speedT = 30; // ms
++	badge_cfg.splash_speedT = 0; // ms, 0 = no startup animation
+ 
+ 	int splash_size = ALIGN_1BYTE(splash.w) * splash.h;
+ 	memcpy(badge_cfg.splash_bm_bits, splash.bits, splash_size);
+@@ -41,7 +62,7 @@ void cfg_fallback()
+ 
+ void cfg_update_crc(badge_cfg_t *cfg)
+ {
+-	cfg->crc = crc_cal((uint8_t *)cfg, CFG_SIZE - 1);
++	cfg->crc = cfg_crc((uint8_t *)cfg, CFG_SIZE - 1);
+ 	PRINT(__func__);
+ 	PRINT(": crc: %02X\n", cfg->crc);
+ }
+@@ -51,17 +72,24 @@ int cfg_writeflash(uint16_t flash_offs, badge_cfg_t *cfg)
+ 	if (flash_offs + CFG_SIZE > EEPROM_MAX_SIZE) {
+ 		return -1;
+ 	}
+-	cfg_update_crc(&badge_cfg);
+-	return EEPROM_WRITE(flash_offs, cfg, CFG_SIZE);
++	cfg_update_crc(cfg);
++	memcpy(cfg_buf, cfg, CFG_SIZE);
++	leds_pause();
++	int r = EEPROM_ERASE(flash_offs, CFG_AREA_SIZE);
++	if (!r)
++		r = EEPROM_WRITE(flash_offs, cfg_buf, CFG_SIZE);
++	leds_resume();
++	return r;
+ }
+ 
+ int cfg_readflash(uint16_t flash_offs, badge_cfg_t *cfg)
+ {
+-	int ret = EEPROM_READ(flash_offs, cfg, CFG_SIZE);
++	int ret = EEPROM_READ(flash_offs, cfg_buf, CFG_SIZE);
+ 	if (ret)
+ 		return ret;
++	memcpy(cfg, cfg_buf, CFG_SIZE);
+ 
+-	return crc_cal((uint8_t *)cfg, CFG_SIZE);
++	return cfg_crc((uint8_t *)cfg, CFG_SIZE);
+ }
+ 
+ int cfg_readflash_def(badge_cfg_t *cfg)
+diff --git a/src/data.c b/src/data.c
+index aa3e93f..bd367f5 100644
+--- a/src/data.c
++++ b/src/data.c
+@@ -18,10 +18,12 @@ uint32_t bigendian16_sum(uint16_t *s, int len)
+ 
+ uint32_t data_flatSave(uint8_t *data, uint32_t len)
+ {
++	leds_pause();
+ 	uint32_t r = EEPROM_ERASE(0, len);
+-	if (r) 
+-		return r;
+-	return EEPROM_WRITE(0, data, len);
++	if (!r)
++		r = EEPROM_WRITE(0, data, len);
++	leds_resume();
++	return r;
+ }
+ 
+ void data_get_header(data_legacy_t *buf)
+@@ -115,6 +117,8 @@ void data_write_highscore(uint16_t score)
+     uint16_t buf[2];
+     buf[0] = HIGHSCORE_MAGIC;
+     buf[1] = score;
++    leds_pause();
+     EEPROM_ERASE(HIGHSCORE_EEPROM_OFFSET, sizeof(buf));
+     EEPROM_WRITE(HIGHSCORE_EEPROM_OFFSET, buf, sizeof(buf));
++    leds_resume();
+ }
+diff --git a/src/flappy.c b/src/flappy.c
+index 06e7e44..6823751 100644
+--- a/src/flappy.c
++++ b/src/flappy.c
+@@ -10,6 +10,8 @@
+ #include <string.h>
+ #include <stdlib.h>
+ 
++extern volatile int fb_lock;
++
+ #define BIRD_COL        5
+ #define PIPE_WIDTH      2
+ #define GAP_SIZE        5
+@@ -83,6 +85,8 @@ static void flappy_die(void)
+ {
+     tmos_stop_task(flappy_taskid, EVT_GAME_TICK);
+ 
++    fb_lock = 1;  /* see fb_show in main.c */
++
+     memset(flappy_fb, 0, LED_COLS * sizeof(uint16_t));
+ 
+     char buf[10];
+@@ -166,6 +170,7 @@ void flappy_init(void)
+ void flappy_start(uint16_t *fb)
+ {
+     flappy_fb = fb;
++    fb_lock = 1;  /* see fb_show in main.c */
+     memset(flappy_fb, 0, LED_COLS * sizeof(uint16_t));
+ 
+     // seeding
+diff --git a/src/game.c b/src/game.c
+index 9e93bea..a5a249a 100644
+--- a/src/game.c
++++ b/src/game.c
+@@ -12,6 +12,8 @@
+ #include "auxbtn.h"
+ #endif
+ 
++extern volatile int fb_lock;
++
+ #define SNAKE_MAX_LEN       100
+ #define SPEED_INITIAL_MS    300
+ #define SPEED_MIN_MS        100
+@@ -75,6 +77,8 @@ static void show_score(void){
+         data_write_highscore(hs);
+     }
+ 
++    fb_lock = 1;  /* see fb_show in main.c */
++
+     memset(game_fb, 0, LED_COLS * sizeof(uint16_t));
+ 
+     char buf[10];
+@@ -229,6 +233,7 @@ void game_init(void)
+ void game_start(uint16_t *fb)
+ {
+     game_fb = fb;
++    fb_lock = 1;  /* see fb_show in main.c */
+     memset(game_fb, 0, LED_COLS * sizeof(uint16_t));
+     init_game();
+     draw_pixel(food.x, food.y, 1);
+diff --git a/src/leddrv.c b/src/leddrv.c
+index 9259000..5c4d8d9 100644
+--- a/src/leddrv.c
++++ b/src/leddrv.c
+@@ -119,7 +119,7 @@ static const pindesc_t led_pins[LED_PINCOUNT] = {
+ 	PINDESC(B, 4),  // Q
+ 	PINDESC(B, 2),  // R
+ 	PINDESC(B, 1),  // S
+-#ifdef HARDWARE_REV3
++#if defined(HARDWARE_REV3) || defined(LED_T_PB6)  // LED_T_PB6: REV2 boards with only T moved
+ 	PINDESC(B, 6), // T
+ #else
+ 	PINDESC(B, 23), // T
+@@ -140,6 +140,19 @@ void led_init()
+ 	}
+ }
+ 
++volatile int leds_paused;
++
++void leds_pause()
++{
++	leds_paused = 1;	/* first, so the timer can't light a column again */
++	leds_releaseall();
++}
++
++void leds_resume()
++{
++	leds_paused = 0;
++}
++
+ void leds_releaseall() {
+ 	for (int i=0; i<LED_PINCOUNT; i++)
+ 		gpio_pin_set(led_pins + i, FLOATING);
+diff --git a/src/leddrv.h b/src/leddrv.h
+index 2e03c8d..193fb24 100644
+--- a/src/leddrv.h
++++ b/src/leddrv.h
+@@ -10,6 +10,13 @@
+ 
+ void led_init();
+ void leds_releaseall();
++
++/* An EEPROM erase/write stalls the LED timer for milliseconds, and the column
++ * that happens to be lit then glows as a bright blip. Wrap flash writes in
++ * leds_pause()/leds_resume(): the matrix goes dark for that moment instead. */
++extern volatile int leds_paused;
++void leds_pause();
++void leds_resume();
+ void led_write2dcol(int dcol, uint16_t col1_val, uint16_t col2_val);
+ void led_write2row_raw(int row, int which_half, uint32_t val);
+ 
+diff --git a/src/legacyctrl.c b/src/legacyctrl.c
+index bc0a725..f13afea 100644
+--- a/src/legacyctrl.c
++++ b/src/legacyctrl.c
+@@ -3,6 +3,7 @@
+ #include "leddrv.h"
+ #include "debug.h"
+ #include "legacyctrl.h"
++#include "config.h"
+ #include "CH58x_common.h"
+ #include "usb/usb.h"
+ 
+@@ -33,7 +34,9 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
+ 		return -1;
+ 	}
+ 
+-	if (!authorized) {
++	/* Upstream checked this unconditionally, so with SECURITY off nothing
++	 * ever set `authorized` and every upload was rejected (#190). */
++	if (badge_cfg.ble_security && !authorized) {
+ 		if (!memcmp(val, "wang", 4)) {
+ 			char buf[32];
+ 			int blen = snprintf(buf, sizeof(buf), "BLE: rejected - not authed\n");
+@@ -143,9 +146,17 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
+ 	return 0;
+ }
+ 
++static uint16_t rx_len;
++
++/* True while a legacy USB transfer is still being reassembled. */
++int legacy_usb_busy()
++{
++	return rx_len != 0;
++}
++
+ int legacy_usb_rx(uint8_t *buf, uint16_t len)
+ {
+-	static uint16_t rx_len, data_len;
++	static uint16_t data_len;
+ 	static uint8_t *data;
+ 
+ 	PRINT("dump first 8 bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+@@ -174,6 +185,9 @@ int legacy_usb_rx(uint8_t *buf, uint16_t len)
+ 	if ((rx_len > LEGACY_HEADER_SIZE) && rx_len >= data_len) {
+ 		data_flatSave(data, data_len);
+ 		free(data);
++		data = NULL;
++		rx_len = 0;
++		data_len = 0;
+ 		handle_after_rx();
+ 	}
+ 	return 0;
+diff --git a/src/legacyctrl.h b/src/legacyctrl.h
+index ca7d0c6..4b90829 100644
+--- a/src/legacyctrl.h
++++ b/src/legacyctrl.h
+@@ -6,6 +6,7 @@
+ void handle_after_rx();
+ int legacy_ble_rx(uint8_t *val, uint16_t len);
+ int legacy_usb_rx(uint8_t *buf, uint16_t len);
++int legacy_usb_busy();
+ 
+ void legacy_set_auth_code(uint16_t code);  // called from main.c on BT-PAIRING entry
+ void legacy_reset_auth();                   // called from peripheral.c on disconnect
+diff --git a/src/main.c b/src/main.c
+index 7b4b3c6..4b637c3 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -26,6 +26,7 @@
+ 
+ #include "usb/usb.h"
+ #include "legacyctrl.h"
++#include "ngctrl.h"
+ 
+ #define NEXT_STATE(v, min, max) \
+ 				(v)++; \
+@@ -87,8 +88,25 @@ static uint32_t sw_centiseconds = 0;
+ static tmosTaskID common_taskid = INVALID_TASK_ID ;
+ 
+ volatile uint16_t fb[LED_COLS] = {0};
+-volatile int mode, is_play_sequentially = 1;
++/* The LED ISR shows fb_show, a copy of fb taken at the start of each frame.
++ * Redraws clear fb and then draw into it; if the ISR caught a column pair in
++ * between, the 1-2 pixels drawn so far got the whole column's current and
++ * flashed bright. fb_clear() sets fb_lock, the main loop drops it after each
++ * TMOS pass, and the ISR only takes a new copy while it is unlocked. */
++static volatile uint16_t fb_show[LED_COLS];
++volatile int fb_lock;
++
++static inline void fb_clear(void)
++{
++	fb_lock = 1;
++	memset((void *)fb, 0, sizeof(fb));
++}
++/* 0 = hold the current bank; KEY2 (bm_transition) steps/toggles. */
++volatile int mode, is_play_sequentially = 0;
+ static int clock_active = 0;
++static int sw_screen = 0;	/* stopwatch screen is showing */
++volatile int in_charging_screen;	/* boot not finished yet, BLE not started */
++int streaming_enabled;
+ 
+ __HIGH_CODE
+ 
+@@ -107,18 +125,10 @@ static void bt_pairing_bypass();
+ __HIGH_CODE
+ static void bm_transition()
+ {
+-	if (is_play_sequentially) {
+-		is_play_sequentially = 0;
+-		bmlist_gohead();
+-		return;
+-	}
+-
++	/* Step one bank per press and wrap. Upstream re-armed auto-cycling on
++	 * wrap-around, which made the banks start switching by themselves. */
+ 	bmlist_current()->anim_step = 0;
+ 	bmlist_gonext();
+-	if (bmlist_current() == bmlist_head()) {
+-		is_play_sequentially = 1;
+-		return;
+-	}
+ }
+ void play_splash(xbm_t *xbm, int col, int row, int spT)
+ {
+@@ -235,13 +245,16 @@ static uint16_t common_tasks(tmosTaskID task_id, uint16_t events)
+ 	}
+ 	
+ 	if (events & CLOCK_TICK) {
+-		disp_clock();
++		/* keep ticking while streaming, just don't draw over the stream */
++		if (!streaming_enabled)
++			disp_clock();
+ 		return events ^ CLOCK_TICK;
+ 	}
+ 
+ 	if (events & STOPWATCH_TICK) {
+ 		sw_centiseconds++;
+-		disp_stopwatch();
++		if (!streaming_enabled)
++			disp_stopwatch();
+ 		return events ^ STOPWATCH_TICK;
+ 	}
+ 
+@@ -261,14 +274,20 @@ void ble_setup()
+ 
+ 	peripheral_init();
+ 
+-	if (! badge_cfg.ble_always_on) {
+-		ble_disable_advertise();
+-	}
+-
+ 	devInfo_registerService();
+ 	legacy_registerService();
+ 	batt_registerService();
+ 	ng_registerService();
++
++	/* gap_init() leaves GAPROLE_ADVERT_ENABLED false and nothing outside the
++	 * BT-PAIRING menu ever set it, so ble_always_on could only ever disable
++	 * something that was already disabled -- you always had to walk into the
++	 * menu. Enable it here, after the services are registered, so a client
++	 * that connects straight away actually finds them. */
++	if (badge_cfg.ble_always_on)
++		ble_enable_advertise();
++	else
++		ble_disable_advertise();
+ }
+ 
+ static void spawn_tasks()
+@@ -287,7 +306,7 @@ static void start_ble_animation()
+ 	tmos_stop_task(common_taskid, ANI_NEXT_STEP);
+ 	tmos_stop_task(common_taskid, ANI_MARQUE);
+ 	tmos_stop_task(common_taskid, ANI_FLASH);
+-	memset(fb, 0, sizeof(fb));
++	fb_clear();
+ 
+ 	tmos_start_reload_task(common_taskid, BLE_NEXT_STEP, 500000 / 625);
+ }
+@@ -315,10 +334,10 @@ static void stop_all_animation()
+ 	tmos_stop_task(common_taskid, ANI_MARQUE);
+ 	tmos_stop_task(common_taskid, ANI_FLASH);
+ 	tmos_stop_task(common_taskid, BLE_NEXT_STEP);
+-	memset(fb, 0, sizeof(fb));
++	fb_clear();
+ }
+ 
+-int streaming_enabled;
++void return_to_menu();
+ 
+ uint8_t streaming_setting(uint8_t *params, uint16_t len)
+ {
+@@ -326,8 +345,18 @@ uint8_t streaming_setting(uint8_t *params, uint16_t len)
+ 		stop_all_animation();
+ 		streaming_enabled = 1;
+ 	} else if (params[0] == 0x01) { // return to normal mode
+-		resume_from_streaming();
+ 		streaming_enabled = 0;
++		/* Go back to whatever was showing. Upstream always resumed the
++		 * bitmap animation, so after streaming from clock mode the slots
++		 * ran with the clock still drawing over them every second. */
++		if (clock_active)
++			disp_clock();
++		else if (sw_screen)
++			disp_stopwatch();
++		else if (mode == MENU)
++			return_to_menu();
++		else
++			resume_from_streaming();
+ 	}
+ 	return 0;
+ }
+@@ -402,7 +431,7 @@ static void fb_puts_small(char *s, int len, int col, int row)
+ 
+ static void disp_auth_code(uint16_t code)
+ {
+-	memset(fb, 0, sizeof(fb));
++	fb_clear();
+ 	char buf[5];
+ 	buf[0] = '0' + (code / 1000) % 10;
+ 	buf[1] = '0' + (code / 100)  % 10;
+@@ -416,7 +445,7 @@ static void disp_clock()
+ {
+     uint16_t year, month, day, hour, minute, second;
+     RTC_GetTime(&year, &month, &day, &hour, &minute, &second);
+-    memset(fb, 0, sizeof(fb));
++    fb_clear();
+ 
+     char buf[6];
+     buf[0] = '0' + hour / 10;
+@@ -431,7 +460,7 @@ static void disp_clock()
+ 
+ static void disp_menu()
+ {
+-    memset(fb, 0, sizeof(fb));
++    fb_clear();
+ 
+     int page = menu_cursor / 2;
+     int item0 = page * 2;
+@@ -474,6 +503,9 @@ static void menu_select(){
+             break;
+         case MENU_IDX_BLE:
+ 			mode = DOWNLOAD;
++			/* KEY1 short press used to stay on menu_up, which redrew the menu
++			 * while BLE_NEXT_STEP kept drawing the BT animation over it. */
++			btn_onOnePress(KEY1, return_to_menu);
+ 			btn_onOnePress(KEY2, NULL);
+ 			btn_onLongPress(KEY1, NULL);
+ 			btn_onLongPress(KEY2, return_to_menu);
+@@ -530,7 +562,7 @@ static void disp_stopwatch()
+     buf[6] = '0' + centis % 10;
+     buf[7] = '\0';
+ 
+-    memset(fb, 0, sizeof(fb));
++    fb_clear();
+     fb_puts(buf, 7, 2, 2);  
+ }
+ 
+@@ -553,6 +585,7 @@ static void sw_reset()
+ 
+ static void sw_back()
+ {
++    sw_screen = 0;
+     sw_state = SW_STOPPED;
+     tmos_stop_task(common_taskid, STOPWATCH_TICK);
+     enter_clock_submenu();
+@@ -563,7 +596,7 @@ static int clock_submenu_sel = 0;
+ 
+ static void disp_clock_submenu()
+ {
+-    memset(fb, 0, sizeof(fb));
++    fb_clear();
+     if (clock_submenu_sel == 0)
+         fb_putchar_small('>', 0, 0);
+     else
+@@ -591,6 +624,7 @@ static void clock_submenu_select()
+         btn_onLongPress(KEY2, enter_clock_submenu);
+     } else {
+         // Enter Stopwatch mode
++        sw_screen = 1;
+         sw_state = SW_STOPPED;
+         sw_centiseconds = 0;
+         disp_stopwatch();
+@@ -605,7 +639,7 @@ static int security_submenu_sel = 0;  // 0 = ENABLE, 1 = DISABLE
+ 
+ static void disp_security_submenu()
+ {
+-    memset(fb, 0, sizeof(fb));
++    fb_clear();
+     if (security_submenu_sel == 0)
+         fb_putchar_small('>', 0, 0);
+     else
+@@ -684,7 +718,7 @@ static int games_submenu_sel = 0;
+ 
+ static void disp_games_submenu(void)
+ {
+-    memset(fb, 0, sizeof(fb));
++    fb_clear();
+     static const char *labels[] = { "SNAKE", "FLAPPY", "PONG" };
+ 
+     int page  = games_submenu_sel / 2;
+@@ -749,6 +783,7 @@ void return_to_menu()
+     tmos_stop_task(common_taskid, CLOCK_TICK);
+     tmos_stop_task(common_taskid, STOPWATCH_TICK);
+     sw_state = SW_STOPPED;
++    sw_screen = 0;
+     clock_active = 0;
+ 
+     mode = MENU;
+@@ -766,23 +801,61 @@ void return_to_menu()
+     disp_menu();
+ }
+ 
++/* Sleep up to ms, polling the keys. Returns 1 (after the key is released)
++ * if one was pressed, so the charging screen can be left. */
++static int wait_or_key(int ms)
++{
++	for (; ms > 0; ms -= 10) {
++		if (isPressed(KEY1) || isPressed(KEY2)) {
++			while (isPressed(KEY1) || isPressed(KEY2))
++				DelayMs(10);
++			return 1;
++		}
++		DelayMs(10);
++	}
++	return 0;
++}
++
++/* Battery voltage on top, raw ADC below, right of the battery icon:
++ * two lines of the 3x5 font fill the 11 rows exactly. */
++static void disp_batt_numbers(int raw)
++{
++	int mv = batt_raw2mv(raw);
++	char v[6] = { '0' + (mv / 1000) % 10, '.', '0' + (mv / 100) % 10,
++	              '0' + (mv / 10) % 10, 'V', 0 };
++	char r[5] = { '0' + (raw / 1000) % 10, '0' + (raw / 100) % 10,
++	              '0' + (raw / 10) % 10, '0' + raw % 10, 0 };
++	for (int c = 17; c < LED_COLS; c++)
++		fb[c] = 0;
++	fb_puts_small(v, 5, 18, 0);
++	fb_puts_small(r, 4, 18, 6);
++}
++
++/* The boot charging screen holds up everything after it, BLE included, so
++ * it gives up on its own after this long (a key press still skips it). */
++#define CHARGING_SCREEN_MS	5000
++
+ static void disp_charging()
+ {
+ 	int blink = 0;
+-	while (1) {
+-		btn_tick();
+-		int percent = batt_raw2percent(batt_raw());
++	for (int shown = 0; shown < CHARGING_SCREEN_MS; shown += 500) {
++		int raw = batt_raw();
++		int percent = batt_raw2percent(raw);
+ 
+ 		if (charging_status()) {
+ 			disp_bat_stt(blink ? percent : 0, 2, 2);
+-			if (ani_xbm_next_frame(&fabm_xbm, fb, 16, 0) == 0) {
+-				fb_puts(VERSION_ABBR, sizeof(VERSION_ABBR), 16, 2);
+-				fb_putchar(' ', 40, 2);
+-			}
++			/* replaces the FOSSASIA animation + version string */
++			disp_batt_numbers(raw);
++			fb_lock = 0;	/* not in the main loop yet */
+ 			blink = !blink;
+-			DelayMs(500);
++			/* Upstream only left this screen when charging stopped, so on
++			 * USB power the badge was stuck here until replugged (and BLE
++			 * never came up). Now: key press or CHARGING_SCREEN_MS. */
++			if (wait_or_key(500))
++				return;
+ 		} else {
+ 			disp_bat_stt(percent, 7, 2);
++			fb_lock = 0;
+ 			DelayMs(500);
+ 			return;
+ 		}
+@@ -802,18 +875,31 @@ void reload_bmlist()
+ 	load_bmlist();
+ }
+ 
++/* Long-press KEY1 in normal mode cycles the 4 brightness levels.
++ * Runs in TMOS task context, so writing the config to EEPROM is safe. */
++static void cycle_brightness()
++{
++	badge_cfg.led_brightness =
++		(badge_cfg.led_brightness + 1) & (BRIGHTNESS_LEVELS - 1);
++	cfg_writeflash_def(&badge_cfg);	/* blanks the LEDs itself, see leds_pause() */
++}
++
+ static void mode_setup_normal()
+ {
++	/* Also reached from handle_after_rx(), which used to leave `mode` at
++	 * MENU so the badge kept drawing the menu after an upload. */
++	mode = NORMAL;
+ 	btn_onOnePress(KEY2, bm_transition);
+-	btn_onLongPress(KEY1, NULL);
++	btn_onLongPress(KEY1, cycle_brightness);
+ 	btn_onLongPress(KEY2, return_to_menu);
+ 	reload_bmlist();
++	bmlist_gohead();          /* show bank 1 after an upload */
+ 	start_normal_animation();
+ }
+ 
+ static void disp_ble_off()
+ {
+-    memset(fb, 0, sizeof(fb));
++    fb_clear();
+     fb_puts_small("BLUETOOTH", 9, 4, 0);
+     fb_puts_small("OFF", 3, 4, 6);
+ }
+@@ -827,9 +913,11 @@ void handle_after_rx()
+         tmos_stop_task(common_taskid, STOPWATCH_TICK);
+         sw_state = SW_STOPPED;
+         clock_active = 0;
+-        stop_all_animation();
+-        disp_ble_off();
+-        tmos_start_task(common_taskid, BLE_OFF_DONE, 1500000 / 625);  
++        /* Always go back to the normal display. Upstream showed a
++         * "BLUETOOTH OFF" screen and then called return_to_menu(), which
++         * left the badge sitting in the menu after every upload, and also
++         * tore down the BLE link we want kept alive for streaming. */
++        mode_setup_normal();
+     }
+ }
+ 
+@@ -840,12 +928,15 @@ int main()
+ 	debug_init();
+ 	PRINT("\nDebug console is on UART%d\n", DEBUG);
+ 
+-	cdc_onWrite(legacy_usb_rx);
+-	hiddev_onWrite(legacy_usb_rx);
++	/* ng_usb_rx() hands anything that is not an ng frame to legacy_usb_rx(). */
++	cdc_onWrite(ng_usb_rx);
++	hiddev_onWrite(ng_usb_rx);
+ 	usb_start();
+ 
+ 	led_init();
+-	TMR0_TimerInit((FREQ_SYS / 2000) / 2);
++	/* 4-phase brightness needs 88 ticks/frame vs the old 44, so double the
++	 * tick rate to keep the panel at ~91 Hz and avoid visible scanning. */
++	TMR0_TimerInit((FREQ_SYS / 4000) / 2);
+ 	TMR0_ITCfg(ENABLE, TMR0_3_IT_CYC_END);
+ 	PFIC_EnableIRQ(TMR0_IRQn);
+ 
+@@ -863,19 +954,34 @@ int main()
+ #endif
+ 
+ 	power_init();
+-	disp_charging();
++	/* Load the config before the charging screen: USB commands are live
++	 * from usb_start() on, and a save_cfg while still on the charging
++	 * screen used to write the zeroed, not-yet-loaded config to EEPROM. */
+ 	cfg_init();
++	in_charging_screen = 1;
++	disp_charging();
++	in_charging_screen = 0;
+ 	xbm_t spl = {
+ 		.bits = &(badge_cfg.splash_bm_bits),
+ 		.w = badge_cfg.splash_bm_w,
+ 		.h = badge_cfg.splash_bm_h,
+ 		.fh = badge_cfg.splash_bm_fh,
+ 	};
+-	play_splash(&spl, 0, 0, badge_cfg.splash_speedT);
++	/* speedT == 0 disables the intro entirely, so an upload shows up at once. */
++	if (badge_cfg.splash_speedT)
++		play_splash(&spl, 0, 0, badge_cfg.splash_speedT);
+ 
+ 	load_bmlist();
+ 
+ 	ble_setup();
++	/* bit7 = pre-emption priority. Let the LED tick interrupt the radio and
++	 * USB handlers; when it had to wait for them, a column stayed lit for a
++	 * whole BLE/USB interrupt instead of one tick and blipped brightly. The
++	 * tick itself only takes a few us. */
++	PFIC_SetPriority(TMR0_IRQn, 0x00);
++	PFIC_SetPriority(BLEB_IRQn, 0x80);
++	PFIC_SetPriority(BLEL_IRQn, 0x80);
++	PFIC_SetPriority(USB_IRQn, 0x80);
+ 
+ 	spawn_tasks();
+ 	btn_init_task();
+@@ -891,6 +997,7 @@ int main()
+ 	disp_menu();
+ 	while (1) {
+ 		TMOS_SystemProcess();
++		fb_lock = 0;
+ 	}
+ }
+ 
+@@ -902,13 +1009,21 @@ void TMR0_IRQHandler(void)
+ 	int state;
+ 
+ 	if (TMR0_GetITFlag(TMR0_3_IT_CYC_END)) {
++		if (leds_paused) {
++			TMR0_ClearITFlag(TMR0_3_IT_CYC_END);
++			return;
++		}
+ 		i++;
+ 		state = i&3;
+ 
+ 		if (state == 0) {
+-			if ((i >> 1) >= LED_COLS)
++			if ((i >> 1) >= LED_COLS) {
+ 				i = 0;
+-			led_write2dcol(i >> 2, fb[i >> 1], fb[(i >> 1) + 1]);
++				if (!fb_lock)
++					for (int c = 0; c < LED_COLS; c++)
++						fb_show[c] = fb[c];
++			}
++			led_write2dcol(i >> 2, fb_show[i >> 1], fb_show[(i >> 1) + 1]);
+ 		}
+ 		else if (state > (badge_cfg.led_brightness&3))
+ 			leds_releaseall();
+diff --git a/src/ngctrl.c b/src/ngctrl.c
+index b5a687e..fb7e058 100644
+--- a/src/ngctrl.c
++++ b/src/ngctrl.c
+@@ -8,6 +8,8 @@
+ #include "debug.h"
+ #include "config.h"
+ #include "leddrv.h"
++#include "legacyctrl.h"
++#include "usb/usb.h"
+ 
+ // TODO: Some of configs can be added, just listing:
+ // - Remote brighness adjusting
+@@ -161,6 +163,72 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
+ 	return 0;
+ }
+ 
++/* val: year_lo year_hi month day hour minute second. The RTC keeps running
++ * across resets as long as the battery holds, see tmos_clockInit(). */
++static uint8_t cfg_set_time(uint8_t *val, uint16_t len)
++{
++	if (len < 7) return -2;
++	uint16_t y = val[0] | (val[1] << 8);
++	if (y < 2020 || y > 2099 || val[2] < 1 || val[2] > 12 || val[3] < 1 || val[3] > 31
++	    || val[4] > 23 || val[5] > 59 || val[6] > 59)
++		return -1;
++	RTC_InitTime(y, val[2], val[3], val[4], val[5], val[6]);
++	return 0;
++}
++
++/* Replies with one 64-byte HID IN report: 'B' 'A' 'T' raw_lo raw_hi mv_lo
++ * mv_hi charging, zero padded. Over BLE there is no reply yet. */
++static uint8_t cfg_battery(uint8_t *val, uint16_t len)
++{
++	int raw = batt_raw();
++	int mv = batt_raw2mv(raw);
++	uint8_t r[64] = { 'B', 'A', 'T', raw & 0xff, raw >> 8, mv & 0xff, mv >> 8,
++	                  (uint8_t)charging_status() };
++	hiddev_reply(r, sizeof(r));
++	return 0;
++}
++
++extern volatile int mode;
++extern int streaming_enabled;
++extern volatile int in_charging_screen;
++
++/* Everything the badge can tell about itself, as one 64-byte HID IN report
++ * (layout v1, little endian; badgetool.py parses it):
++ *  0 'STA'  3 layout version  4 ble_always_on  5 led_brightness
++ *  6 splash_speedT u16  8 reset_rx  9 ble_security  10 ble_devname[20]
++ * 30 year u16  32 mon  33 day  34 hour  35 min  36 sec
++ * 37 batt raw u16  39 batt mV u16  41 charging  42 mode
++ * 43 flags: bit0 streaming, bit1 still on the boot charging screen
++ * 44 VERSION, NUL padded (truncated to 20 chars) */
++static uint8_t cfg_status(uint8_t *val, uint16_t len)
++{
++	uint8_t r[64] = { 'S', 'T', 'A', 1 };
++	uint16_t y, mo, d, h, mi, sec;
++	int raw = batt_raw();
++	int mv = batt_raw2mv(raw);
++
++	r[4] = badge_cfg.ble_always_on;
++	r[5] = badge_cfg.led_brightness;
++	r[6] = badge_cfg.splash_speedT & 0xff;
++	r[7] = badge_cfg.splash_speedT >> 8;
++	r[8] = badge_cfg.reset_rx;
++	r[9] = badge_cfg.ble_security;
++	tmos_memcpy(&r[10], badge_cfg.ble_devname, 20);
++	RTC_GetTime(&y, &mo, &d, &h, &mi, &sec);
++	r[30] = y & 0xff; r[31] = y >> 8;
++	r[32] = mo; r[33] = d; r[34] = h; r[35] = mi; r[36] = sec;
++	r[37] = raw & 0xff; r[38] = raw >> 8;
++	r[39] = mv & 0xff; r[40] = mv >> 8;
++	r[41] = charging_status();
++	r[42] = mode;
++	r[43] = (streaming_enabled ? 1 : 0) | (in_charging_screen ? 2 : 0);
++	const char *v = VERSION;
++	for (int i = 0; i < 20 && v[i]; i++)
++		r[44 + i] = v[i];
++	hiddev_reply(r, sizeof(r));
++	return 0;
++}
++
+ uint8_t misc(uint8_t *val, uint16_t len)
+ {
+ 	PRINT(__func__);
+@@ -170,6 +238,9 @@ uint8_t misc(uint8_t *val, uint16_t len)
+ 	const uint8_t (*misc_cmd[])(uint8_t *, uint16_t) = {
+ 		cfg_splash_speed,
+ 		cfg_led_brightness,
++		cfg_set_time,
++		cfg_battery,
++		cfg_status,
+ 	};
+ 
+ 	uint8_t fn = val[0];
+@@ -194,6 +265,54 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
+ 
+ #define CMD_LUT_LEN (sizeof(cmd_lut) / sizeof(cmd_lut[0]))
+ 
++/* ng protocol over USB (HID + CDC).
++ *
++ * The legacy protocol claims any transfer starting with the "wang" magic, so we only
++ * take packets carrying our own magic, and only while legacy is idle:
++ *
++ *   'N' 'G' len_lo len_hi payload[len]
++ *
++ * A payload can span several USB packets -- HID reports are 64 bytes and a
++ * full 44x11 frame is 88 -- so reassemble before handing it to ng_parse().
++ */
++#define NG_USB_HDR_LEN  4
++#define NG_USB_BUF_SIZE 320
++
++static uint8_t  ng_usb_buf[NG_USB_BUF_SIZE];
++static uint16_t ng_usb_expect;
++static uint16_t ng_usb_have;
++
++int ng_usb_rx(uint8_t *buf, uint16_t len)
++{
++	if (ng_usb_have == 0) {
++		if (legacy_usb_busy() || len < NG_USB_HDR_LEN
++		    || buf[0] != 'N' || buf[1] != 'G')
++			return legacy_usb_rx(buf, len);
++
++		ng_usb_expect = buf[2] | (buf[3] << 8);
++		if (ng_usb_expect == 0 || ng_usb_expect > NG_USB_BUF_SIZE) {
++			ng_usb_expect = 0;
++			return -1;
++		}
++
++		buf += NG_USB_HDR_LEN;
++		len -= NG_USB_HDR_LEN;
++	}
++
++	if (len > ng_usb_expect - ng_usb_have)
++		len = ng_usb_expect - ng_usb_have;
++	tmos_memcpy(ng_usb_buf + ng_usb_have, buf, len);
++	ng_usb_have += len;
++
++	if (ng_usb_have < ng_usb_expect)
++		return 0;
++
++	ng_parse(ng_usb_buf, ng_usb_expect);
++	ng_usb_have = 0;
++	ng_usb_expect = 0;
++	return 0;
++}
++
+ uint8_t ng_parse(uint8_t *val, uint16_t len)
+ {
+ 	if (len < 1) return bleInvalidRange;
+diff --git a/src/ngctrl.h b/src/ngctrl.h
+index 460af28..a400ef7 100644
+--- a/src/ngctrl.h
++++ b/src/ngctrl.h
+@@ -16,5 +16,6 @@ uint8_t flash_splash_screen(uint8_t *val, uint16_t len);
+ 
+ extern const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len);
+ uint8_t ng_parse(uint8_t *val, uint16_t len);
++int ng_usb_rx(uint8_t *buf, uint16_t len);
+ 
+ #endif /* __NG_CTRL_H__ */
+diff --git a/src/pong.c b/src/pong.c
+index 0b57333..b1a15ae 100644
+--- a/src/pong.c
++++ b/src/pong.c
+@@ -10,6 +10,8 @@
+ #include <string.h>
+ #include <stdlib.h>
+ 
++extern volatile int fb_lock;
++
+ static void move_paddle_up(void);
+ static void move_paddle_down(void);
+ 
+@@ -75,6 +77,7 @@ static void game_puts(const char *s, int col, int row)
+ 
+ static void show_result(uint8_t player_won)
+ {
++    fb_lock = 1;  /* see fb_show in main.c */
+     memset(pong_fb, 0, LED_COLS * sizeof(uint16_t));
+ 
+     if (player_won)
+@@ -261,6 +264,7 @@ void pong_init(void)
+ void pong_start(uint16_t *fb)
+ {
+     pong_fb = fb;
++    fb_lock = 1;  /* see fb_show in main.c */
+     memset(pong_fb, 0, LED_COLS * sizeof(uint16_t));
+ 
+     // similar to snake 
+diff --git a/src/power.c b/src/power.c
+index 5d2e5c2..9a3a0b5 100644
+--- a/src/power.c
++++ b/src/power.c
+@@ -2,10 +2,27 @@
+ 
+ #include "power.h"
+ #include "button.h"
++#include "leddrv.h"
+ #include "debug.h"
+ 
+ void poweroff()
+ {
++	/* Stop the LED scan before anything else. The TMR0 ISR keeps re-driving
++	 * the charlieplex pins, so idling here with it running and then cutting
++	 * power mid-scan leaves whichever column was lit stuck on at full
++	 * brightness. */
++	PFIC_DisableIRQ(TMR0_IRQn);
++	leds_releaseall();
++
++	/* On 2-key hardware OFF is chosen with a KEY1 long-press, so KEY1 is
++	 * still held down right here. Arming a rising-edge wake on it would
++	 * fire immediately and reboot the badge, so wait for release first.
++	 * 4-key boards select with KEY3, which is why upstream never hit this. */
++	GPIOA_ModeCfg(KEY1_PIN, GPIO_ModeIN_PD);
++	while (isPressed(KEY1))
++		DelayMs(10);
++	DelayMs(100);   /* debounce the release */
++
+ 	// Stop wasting energy
+ 	GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_Floating);
+ 	GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_Floating);
+@@ -15,6 +32,8 @@ void poweroff()
+ 	GPIOA_ITModeCfg(KEY1_PIN, GPIO_ITMode_RiseEdge);
+ 	GPIOA_ModeCfg(CHARGE_STT_PIN, GPIO_ModeIN_PU);
+ 	GPIOA_ITModeCfg(CHARGE_STT_PIN, GPIO_ITMode_FallEdge);
++	/* Drop any edge latched while the menu key was being released. */
++	GPIOA_ClearITFlagBit(KEY1_PIN | CHARGE_STT_PIN);
+ 	PFIC_EnableIRQ(GPIO_A_IRQn);
+ 	PWR_PeriphWakeUpCfg(ENABLE, RB_SLP_GPIO_WAKE, Long_Delay);
+ 
+@@ -22,13 +41,17 @@ void poweroff()
+ 	LowPower_Shutdown(0);
+ }
+ 
++/* Upstream measured this but never applied it; WCH's samples add it to
++ * every conversion. */
++static int16_t adc_calib;
++
+ void power_init()
+ {
+ 	Calibration_LSI(Level_128);
+ 	GPIOA_ModeCfg(GPIO_Pin_5, GPIO_ModeIN_Floating);
+ 	ADC_ExtSingleChSampInit(SampleFreq_3_2, ADC_PGA_0);
+ 
+-	int16_t adc_calib = ADC_DataCalib_Rough();
++	adc_calib = ADC_DataCalib_Rough();
+ 	PRINT("RoughCalib_Value = %d \n", adc_calib);
+ 
+ 	ADC_ChannelCfg(1);
+@@ -41,7 +64,7 @@ int batt_raw()
+ 	PRINT("ADC reading: \n");
+ 	uint16_t buf[20];
+ 	for(int i = 0; i < 20; i++) {
+-		uint16_t adc = ADC_ExcutSingleConver();
++		int adc = ADC_ExcutSingleConver() + adc_calib;
+ 		ret += adc;
+ 		PRINT("%d \n", adc);
+ 	}
+@@ -67,6 +90,15 @@ int charging_status()
+ #define ADC2VOLT(raw)           ((raw) / ADC_MAX_VAL * ADC_MAX_VOLT)
+ #define VOLT2ADC(volt)          ((volt) / ADC_MAX_VOLT * ADC_MAX_VAL)
+ 
++/* Battery voltage in mV from a batt_raw() value. uint32: raw * 592200
++ * gets close to INT32_MAX at a full cell. */
++int batt_raw2mv(int r)
++{
++	if (r < 0) r = 0;
++	return (int)((uint32_t)r * (uint32_t)(ADC_MAX_VOLT * 1000)
++		* (uint32_t)(R1 + R2) / (uint32_t)R2 / (uint32_t)ADC_MAX_VAL);
++}
++
+ int batt_raw2percent(int r)
+ {
+ 	float vadc = ADC2VOLT(r);
+diff --git a/src/power.h b/src/power.h
+index 199a96e..c062511 100644
+--- a/src/power.h
++++ b/src/power.h
+@@ -13,5 +13,6 @@ void poweroff();
+ int batt_raw();
+ int charging_status();
+ int batt_raw2percent(int r);
++int batt_raw2mv(int r);
+ 
+ #endif /* __RESET_H__ */
+diff --git a/src/usb/composite/hiddev.c b/src/usb/composite/hiddev.c
+index bb075e5..3e41216 100644
+--- a/src/usb/composite/hiddev.c
++++ b/src/usb/composite/hiddev.c
+@@ -137,27 +137,46 @@ static void hid_request_handler(USB_SETUP_REQ * request)
+ }
+ 
+ static volatile uint16_t transferred;
++static int in_tog;		/* DATA0/1 of the next IN packet */
++static uint8_t reply_len;	/* armed by hiddev_reply() after the OUT ack */
++
++/* Arm an IN report only via the T_* bits. set_handshake() rewrites the whole
++ * EP1 control register and T_LEN, which is why a reply loaded from inside the
++ * OUT callback used to be wiped back to a zero-length packet. */
++static void arm_in(uint8_t len)
++{
++	R8_UEP1_T_LEN = len;
++	R8_UEP1_CTRL = (R8_UEP1_CTRL & ~(MASK_UEP_T_RES | RB_UEP_T_TOG))
++		| UEP_T_RES_ACK | (in_tog ? RB_UEP_T_TOG : 0);
++	in_tog = !in_tog;
++	transferred = 0;
++}
+ 
+ static void ep_handler()
+ {
+ 	_TRACE();
+-	static int tog;
+ 	uint8_t token = R8_USB_INT_ST & MASK_UIS_TOKEN;
+ 
+ 	switch(token) {
+ 	case UIS_TOKEN_OUT:
+ 		if (on_write)
+ 			on_write(ep_out, R8_USB_RX_LEN);
+-		set_handshake(EP_NUM, USB_ACK, tog, 0);
+-		tog = !tog;
++		/* Only touch the OUT (R_*) side. Upstream used set_handshake()
++		 * here, which also armed IN with a zero-length packet after
++		 * every OUT; the host consumed those, so its IN data toggle
++		 * drifted and real replies were dropped every other time. */
++		R8_UEP1_CTRL = ((R8_UEP1_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK)
++			^ RB_UEP_R_TOG;
++		if (reply_len) {
++			arm_in(reply_len);
++			reply_len = 0;
++		}
+ 		break;
+ 
+ 	case UIS_TOKEN_IN:
+-		if (transferred == 0) {
+-			transferred = 1;
+-		} else {
+-			set_handshake(EP_NUM, USB_NAK, 1, 0);
+-		}
++		/* sent: NAK until the next reply instead of resending it */
++		R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_NAK;
++		transferred = 1;
+ 		break;
+ 		break;
+ 	
+@@ -173,15 +192,23 @@ void hiddev_fill_IN(uint8_t *buf, uint8_t len)
+ 	if (len > read_ep_desc.wMaxPacketSize)
+ 		return;
+ 
+-	static int tog;
+-
+ 	memcpy(ep_in, buf, len);
+-	set_handshake(EP_NUM, USB_ACK, tog, len);
++	set_handshake(EP_NUM, USB_ACK, in_tog, len);
+ 
+-	tog = !tog;
++	in_tog = !in_tog;
+ 	transferred = 0;
+ }
+ 
++/* Queue a reply to the OUT report currently being handled (call it from the
++ * on_write callback). It is armed once the OUT has been acknowledged. */
++void hiddev_reply(uint8_t *buf, uint8_t len)
++{
++	if (len > read_ep_desc.wMaxPacketSize)
++		return;
++	memcpy(ep_in, buf, len);
++	reply_len = len;
++}
++
+ static int wait_until_sent(uint16_t timeout_ms)
+ {
+ 	while(timeout_ms--) {
+diff --git a/src/usb/usb.h b/src/usb/usb.h
+index f1d41f9..74df77e 100644
+--- a/src/usb/usb.h
++++ b/src/usb/usb.h
+@@ -8,6 +8,7 @@ int cdc_tx_poll(uint8_t *buf, int len, uint16_t timeout_ms);
+ void cdc_onWrite(void (*cb)(uint8_t *buf, uint16_t len));
+ 
+ void hiddev_fill_IN(uint8_t *buf, uint8_t len);
++void hiddev_reply(uint8_t *buf, uint8_t len);
+ int hiddev_tx_poll(uint8_t *buf, int len, uint16_t timeout_ms);
+ void hiddev_onWrite(void (*cb)(uint8_t *buf, uint16_t len));
+ 

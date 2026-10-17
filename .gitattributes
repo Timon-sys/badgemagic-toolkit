@@ -1,0 +1,3 @@
+# keep byte-exact: the patch has mixed line endings on purpose
+*.diff binary
+*.bin binary

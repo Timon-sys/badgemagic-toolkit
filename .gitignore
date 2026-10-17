@@ -1,0 +1,26 @@
+# personal
+config.toml
+*_unclean.py
+badge.ps1
+
+# big / third-party binaries, download them yourself
+toolchain/
+
+
+badgemagic.exe
+
+# firmware dumps and build output
+firmware-backup/
+*.bin
+*.elf
+*.hex
+*.map
+!firmware/*.bin
+
+# editor / python
+.vscode/
+__pycache__/
+
+# upstream clone with our changes: shipped as the .diff + firmware/*.bin
+badgemagic-firmware/
+tools/
