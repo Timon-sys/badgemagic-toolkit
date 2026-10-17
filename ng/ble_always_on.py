@@ -22,7 +22,7 @@ except Exception:
     pass
 print("ble_always_on =", int(on), "saved, badge rebooting")
 
-# a software reset clears the RTC, so put the time back once it re-enumerates
+# the RTC survives the reset but drifts, so set it once the badge re-enumerates
 import datetime, hid
 time.sleep(3)   # let the old USB instance go away first
 for _ in range(30):

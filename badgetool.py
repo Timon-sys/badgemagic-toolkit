@@ -35,6 +35,7 @@ import argparse
 import asyncio
 import datetime
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -44,9 +45,11 @@ import time
 import hid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WCHISP = os.path.join(HERE, "tools", "wchisp-win-x64", "wchisp.exe")
-if not os.path.exists(WCHISP):
-    WCHISP = "wchisp"  # from PATH
+# wchisp: tools/wchisp-win-x64/ or tools/ next to this file, else PATH; None = not installed
+WCHISP = next((c for c in (os.path.join(HERE, "tools", "wchisp-win-x64", "wchisp.exe"),
+                           os.path.join(HERE, "tools", "wchisp.exe"),
+                           os.path.join(HERE, "tools", "wchisp")) if os.path.isfile(c)),
+              None) or shutil.which("wchisp")
 # prebuilt firmware: pb6 = boards with LED line T on PB6 (dead columns and a
 # flickering row on the normal build), normal = everything else
 FIRMWARE = {v: os.path.join(HERE, "firmware", f"badgemagic-ch582-2key{s}.bin")
@@ -248,7 +251,7 @@ def find_badges():
             kind = "custom"
         elif prod == "LS32 Custm HID":
             kind = "ls32"
-        elif man == "wch.cn":
+        elif man == "wch.cn" or "CH583" in prod:
             kind = "stock"
         else:
             kind = "unknown"
@@ -289,7 +292,8 @@ class Badge:
         self.ng(payload)
         r = bytes(self.d.read(64, 1000))
         if r[:3] != magic:
-            raise RuntimeError("no reply from the badge (firmware older than 2026-10-17?)")
+            raise RuntimeError("no reply from the badge; this needs the patched firmware "
+                               "from this repo (try 'badgetool.py flash')")
         return r
 
     def status(self):
@@ -553,7 +557,8 @@ def wait_for_custom(timeout=30):
 
 
 def reboot_and_restore_time(b):
-    """A software reset clears the RTC, so put the time back afterwards."""
+    """Reboot. The RTC keeps running across the reset, but it drifts (internal RC
+    oscillator), so set it to the PC time while we're at it."""
     if isinstance(b, BleBadge):
         addr, keep = b.address, b.keep
         try:
@@ -658,9 +663,11 @@ def cmd_list(a):
     for i, b in enumerate(badges):
         what = {"custom": "CH582, custom firmware (full control)",
                 "stock": "CH582, factory firmware (text/image only)",
-                "ls32": "old LS32 badge, factory firmware (text/image only)",
+                "ls32": "LS32 badge, factory firmware (text/image only)",
                 "unknown": "unknown 0416:5020 device"}[b["kind"]]
         extra = ""
+        if b["kind"] == "unknown":
+            extra = f'  (manufacturer "{b["man"]}", product "{b["prod"]}")'
         if b["kind"] == "custom":
             try:
                 bd = Badge(b)
@@ -669,7 +676,7 @@ def cmd_list(a):
             except Exception:
                 pass
         print(f"#{i}  {what}{extra}")
-    if os.path.exists(WCHISP):
+    if WCHISP:
         r = subprocess.run([WCHISP, "probe"], capture_output=True, text=True)
         if "Found 0" not in (r.stdout + r.stderr) and "Device #" in (r.stdout + r.stderr):
             print("plus a badge in ISP (flash) mode")
@@ -797,6 +804,13 @@ def cmd_text(a):
           f"({sum(sl['groups'] for sl in slots) * 8} px wide in total, mode {a.mode}, speed {a.speed})")
 
 
+def toml_speed(m, path):
+    sp = m.get("speed", 4)
+    if not isinstance(sp, int) or not 0 <= sp <= 7:
+        raise ValueError(f"{path}: speed must be 0-7, got {sp!r} (message {m.get('text', '')!r})")
+    return sp
+
+
 def cmd_upload(a):
     """badgemagic-style config.toml: [[message]] text/mode/speed/blink/border.
     Rendered like 'text' (thin font by default), so it works over USB and BLE."""
@@ -808,7 +822,7 @@ def cmd_upload(a):
         sys.exit(f"{a.file}: needs 1 to 8 [[message]] blocks")
     slots = [make_slot(text_blocks(m.get("text", ""), getattr(a, "font", "thin")),
                        m.get("mode", "left"),
-                       int(m.get("speed", 4)), bool(m.get("blink", False)),
+                       toml_speed(m, a.file), bool(m.get("blink", False)),
                        bool(m.get("border", False))) for m in msgs]
     b = open_one(a)
     b.upload_slots(slots)
@@ -863,6 +877,9 @@ def cmd_flash(a):
     fw = FIRMWARE.get(a.firmware, a.firmware)
     if not os.path.exists(fw):
         sys.exit("firmware not found: " + fw)
+    if not WCHISP:
+        sys.exit("wchisp not found: get it from https://github.com/ch32-rs/wchisp/releases "
+                 "and put it in tools/ or on your PATH")
     print("Put the badge in ISP mode: unplug, hold the button nearest USB, plug in.")
     print("Waiting up to 5 minutes ...")
     end = time.time() + 300
@@ -873,6 +890,9 @@ def cmd_flash(a):
         time.sleep(0.4)
     else:
         sys.exit("timed out")
+    # Factory badges ship with read-out protection on and debug off. 'config reset'
+    # writes WCH's default option bytes (unprotected, debug enabled, reset pin on)
+    # so the flash write and verify are allowed; nothing else on the chip changes.
     subprocess.run([WCHISP, "config", "reset"])
     r = subprocess.run([WCHISP, "flash", fw])
     if r.returncode != 0:
@@ -937,6 +957,14 @@ def pick_channel():
                 print("could not connect:", e)
 
 
+def menu_upload():
+    path = os.path.join(HERE, "config.toml")
+    if not os.path.exists(path):
+        print("no config.toml yet: copy config.example.toml to config.toml and edit it")
+        return
+    cmd_upload(ns(file=path, font="thin"))
+
+
 def menu_text():
     msgs = [m for m in iter(lambda: input("slot text (empty = done): "), "")][:8]
     if not msgs:
@@ -969,8 +997,7 @@ def _menu():
         ("Bluetooth name", lambda: cmd_name(ns(name=input("new name (max 20): ").strip()))),
         ("startup animation", lambda: cmd_splash(ns(state=ask("on/off: ", ("on", "off"))))),
         ("upload text (replaces all slots)", menu_text),
-        ("upload config.toml", lambda: cmd_upload(ns(file=os.path.join(HERE, "config.toml"),
-                                                    font="thin"))),
+        ("upload config.toml", menu_upload),
         ("upload image", lambda: cmd_image(ns(file=input("image path: ").strip('" '),
                                               invert=False, preview=False))),
         ("full white test screen", lambda: cmd_stream(ns(what="white"))),
@@ -1064,8 +1091,8 @@ def main():
     a = p.parse_args()
     try:
         a.f(a)
-    except RuntimeError as e:  # badge-side problems: a message, not a traceback
-        sys.exit(f"error: {e}")
+    except (RuntimeError, ValueError, OSError, tomllib.TOMLDecodeError) as e:
+        sys.exit(f"error: {e}")  # badge problems or bad input: a message, not a traceback
 
 
 if __name__ == "__main__":

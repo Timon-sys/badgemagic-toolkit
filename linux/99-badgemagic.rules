@@ -1,0 +1,11 @@
+# udev rules for the LED badges, so badgetool.py and wchisp work without sudo.
+# Install:  sudo cp 99-badgemagic.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload && sudo udevadm trigger
+# then unplug and replug the badge.
+
+# The badge in normal mode (all variants), USB HID: hidraw and libusb backends
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="5020", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0416", ATTR{idProduct}=="5020", MODE="0660", TAG+="uaccess"
+
+# CH582 in ISP (flash) mode, used by wchisp
+SUBSYSTEM=="usb", ATTR{idVendor}=="4348", ATTR{idProduct}=="55e0", MODE="0660", TAG+="uaccess"

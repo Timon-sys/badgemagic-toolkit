@@ -28,7 +28,8 @@ list` tells you which kind is plugged in by its USB name:
 | LS32 (older, USB only) | "LS32 Custm HID" | text and images over USB |
 
 All of them show up as USB device `0416:5020` and share the legacy "wang"
-upload format, the same one the app uses.
+upload format, the same one the app uses. If `list` says `unknown`, please
+open an issue with its output (it shows the USB strings).
 Only the patched firmware also speaks the `ng` protocol, which handles settings,
 status, the clock and streaming.
 
@@ -39,11 +40,14 @@ status, the clock and streaming.
   - `bleak` is only needed for Bluetooth
   - `pillow` is only needed for images
 - Windows, Linux or macOS. Development and testing were done on Windows 11.
-  On Linux you will probably need a udev rule for `0416:5020`.
+  On Linux, install [`linux/99-badgemagic.rules`](linux/99-badgemagic.rules)
+  (instructions inside) to use the badge without `sudo`. The rule hasn't been
+  tested on a Linux machine yet.
 
 ## Quick start
 
 ```sh
+cp config.example.toml config.toml  # your slots; the menu's "upload config.toml" uses it
 python badgetool.py                 # interactive menu: pick USB / BLE, then a badge
 python badgetool.py list            # badges on USB
 python badgetool.py status          # everything the badge reports
@@ -111,7 +115,10 @@ BOM (e.g. by PowerShell) is read correctly.
 ## Example scripts (`ng/`)
 
 Small standalone scripts from the development of the firmware, handy as
-protocol examples. `badgetool.py` can do all of it too.
+protocol examples. `badgetool.py` can do all of it too, so for normal use you
+don't need them. **Read a script before running it:** several change and
+save settings, and some reboot the badge. They only work with the patched
+firmware.
 
 | Script | What it does |
 |---|---|
@@ -125,26 +132,75 @@ protocol examples. `badgetool.py` can do all of it too.
 
 ## The patched firmware
 
-Ready-to-flash builds are in [`firmware/`](firmware/), for the 2-button
-USB-C badges:
+### Before you flash
 
-| File | For |
-|---|---|
-| `badgemagic-ch582-2key-pb6.bin` | boards where LED line T is wired to PB6 (see the first fix below) |
-| `badgemagic-ch582-2key.bin` | all other boards |
+- **There is no way back to the factory firmware.** It is read-protected, so
+  nobody can make a copy of it, only of the data EEPROM. The patched
+  firmware does everything the factory one does and works with the Badge
+  Magic app.
+- **A failed or wrong flash can be redone.** The ISP bootloader sits in its
+  own protected area of the chip that flashing doesn't touch. If the badge
+  shows garbage or nothing at all after a flash, enter ISP mode again and
+  flash the right file.
+- **Only CH582M badges with 44 columns.** Some badges look the same outside
+  but have another chip or a 48 or 55 column matrix. If in doubt, open the
+  case and read the chip marking. Upstream's
+  [CH582.md](https://github.com/fossasia/badgemagic-firmware/blob/master/CH582.md)
+  has photos.
+- **The files here are for the 2-button USB-C version only,** the only one
+  these patches were tested on. Upstream also supports 4 buttons and the older
+  micro-USB boards (`KEY_COUNT=4`, `HARDWARE_REV1=1`). You can build those
+  from source (see [Building](#building)), but they are untested with these
+  patches.
+- **`badgetool.py flash` runs `wchisp config reset` first,** like upstream's
+  instructions do. Factory badges ship with read-out protection on and
+  debugging off, and this writes WCH's default option bytes (no protection,
+  debug enabled, reset pin on) so that the flash write and verify are
+  allowed. It changes nothing else.
 
-Not sure which one you need? Try `normal` first. If two columns stay dark
-and the second-to-last row flickers, flash `pb6`.
+### Which file
 
-The source is upstream at commit `b2137f0` plus
-[`badgemagic-custom-patches.diff`](badgemagic-custom-patches.diff):
+Ready-to-flash builds are in [`firmware/`](firmware/), with checksums in
+[`firmware/SHA256SUMS`](firmware/SHA256SUMS) (`sha256sum -c SHA256SUMS`).
+They are also attached to the
+[releases](https://github.com/Timon-sys/badgemagic-toolkit/releases).
 
-```sh
-git clone https://github.com/fossasia/badgemagic-firmware
-cd badgemagic-firmware
-git checkout b2137f0
-git apply ../badgemagic-custom-patches.diff
-```
+| File | `flash` name | For |
+|---|---|---|
+| `badgemagic-ch582-2key.bin` | `normal` | most boards |
+| `badgemagic-ch582-2key-pb6.bin` | `pb6` | boards where LED line T is wired to PB6 |
+
+Not sure which one you need? Flash `normal` first. If two columns stay dark
+and the second-to-last row flickers, flash `pb6`; nothing breaks either way.
+
+### Flashing
+
+1. Get [wchisp](https://github.com/ch32-rs/wchisp/releases) and put it in
+   `tools/` (`tools/wchisp-win-x64/` works too) or anywhere on your `PATH`.
+2. One-time setup:
+   - **Windows:** the first time a badge is in ISP mode, use
+     [Zadig](https://zadig.akeo.ie/) to install WinUSB for `4348:55E0`.
+   - **Linux:** install [`linux/99-badgemagic.rules`](linux/99-badgemagic.rules)
+     (instructions inside), so neither the tool nor wchisp needs `sudo`.
+3. Run `python badgetool.py flash normal` (or `flash pb6`). It waits up to
+   5 minutes for a badge in ISP mode.
+4. Enter ISP mode:
+   - **Factory firmware:** switch the badge off (or disconnect the battery),
+     then hold the button **nearest the USB port** while plugging in USB.
+     If that doesn't work, upstream describes a second method (shorting C3)
+     in its README.
+   - **Patched firmware already on it:** with USB plugged in, hold that same
+     button for more than 2 seconds. On the way it may jump to the menu;
+     keep holding.
+
+   ISP mode shows a single lit pixel near the middle and lasts about 10
+   seconds, and `badgetool.py` starts flashing as soon as it sees the badge.
+5. The tool flashes, verifies, waits for the badge to reboot and sets its
+   clock.
+
+wchisp only rewrites the program flash, so in our tests the slots and
+settings survived a reflash. The first flash over factory firmware starts
+with default settings, because this firmware keeps them somewhere else.
 
 ### Fixes
 
@@ -184,38 +240,29 @@ git apply ../badgemagic-custom-patches.diff
 
 ### Building
 
-The toolchain is `riscv-none-embed-gcc` 8.2 (MounRiver / xPack) plus `make`.
-From Git Bash:
+You don't need to build anything to use the files in `firmware/`. To build
+them yourself, get upstream at commit `b2137f0` and apply
+[`badgemagic-custom-patches.diff`](badgemagic-custom-patches.diff):
 
 ```sh
+git clone https://github.com/fossasia/badgemagic-firmware
 cd badgemagic-firmware
-BUILD_DIR=usb-c-2key-t6 KEY_COUNT=2 LED_T_PB6=1 make   # pb6 build
-BUILD_DIR=usb-c-2key KEY_COUNT=2 make                  # normal build
+git checkout b2137f0
+git apply ../badgemagic-custom-patches.diff
 ```
 
-The result is `<BUILD_DIR>/badgemagic-ch582.bin`; flash it with
-`badgetool.py flash path/to/badgemagic-ch582.bin`.
+The toolchain is `riscv-none-embed-gcc` 8.2 (MounRiver / xPack) plus `make`,
+on Linux, macOS or Windows (we used Git Bash). If the compiler isn't on your
+`PATH`, set `PREFIX` as upstream's README describes.
 
-### Flashing
+```sh
+BUILD_DIR=usb-c-2key KEY_COUNT=2 make                  # normal build
+BUILD_DIR=usb-c-2key-t6 KEY_COUNT=2 LED_T_PB6=1 make   # pb6 build
+```
 
-1. Get [wchisp](https://github.com/ch32-rs/wchisp) and put it in
-   `tools/wchisp-win-x64/`, or anywhere on your `PATH`.
-2. Windows only: the first time a badge is in ISP mode, use
-   [Zadig](https://zadig.akeo.ie/) to install WinUSB for `4348:55E0`.
-3. Enter ISP mode: unplug the badge, hold the button **nearest the USB port**,
-   and plug it back in.
-4. Run `python badgetool.py flash normal` (or `flash pb6`). It waits up to
-   5 minutes for the badge, flashes it and sets the clock once the badge has
-   rebooted.
-
-wchisp only rewrites the program flash, so in our tests the slots and
-settings survived a reflash. The first flash over factory firmware starts
-with defaults, because the settings live somewhere else in this firmware.
-
-**There is no way back to the factory firmware.** It is read-protected, so
-`wchisp` can't make a copy of it, only of the data EEPROM. The patched
-firmware does everything the factory one does and works with the Badge
-Magic app.
+The result is `<BUILD_DIR>/badgemagic-ch582.bin`, and a clean checkout with
+the patch builds byte-identical copies of the files in `firmware/`. Flash it
+with `badgetool.py flash path/to/badgemagic-ch582.bin`.
 
 ## Protocol notes
 

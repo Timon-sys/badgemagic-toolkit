@@ -1,5 +1,13 @@
+"""Reset the badge's settings to the firmware defaults and save them.
+
+This also resets the Bluetooth name to "LED Badge Magic" and brightness to 0.
+"""
+import sys
 import time
 from badge_ng import *
+
+if "-y" not in sys.argv and input("reset ALL settings (name, brightness, ...) to defaults? [y/N] ").strip().lower() != "y":
+    sys.exit("nothing changed")
 
 b = HidBadge()
 print("loading firmware defaults (splash off, BLE always-on)...")
