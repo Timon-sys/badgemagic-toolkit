@@ -58,8 +58,9 @@ What you notice, and what you can do now that you couldn't before:
   button press forever.
 - **Calmer buttons.** The button nearest USB steps one slot per press (the
   slots no longer start cycling on their own), a long press on the other
-  button changes brightness, and after an upload the badge shows your slots
-  straight away.
+  button changes brightness, and the badge shows your slots straight away
+  after booting and after an upload (a long press on the button nearest
+  USB opens the menu).
 
 ### Always-on Bluetooth
 
@@ -73,9 +74,14 @@ badge.
 
 - Switch it with `python badgetool.py ble on` / `ble off` (the badge
   reboots to apply it).
+- With always-on off, the badge is only visible while you're in the
+  BT-PAIRING menu. It goes quiet again once an upload finishes or you leave
+  the menu. If something is still connected at that point, the connection
+  stays open until it closes, and the badge doesn't advertise afterwards.
 - While something is connected, the badge stops advertising: it takes one
   connection at a time. If a scan doesn't find it, close the other
-  connection (the phone app, or the `badgetool.py` menu).
+  connection (the phone app, or the `badgetool.py` menu, which keeps its
+  connection open until you quit it).
 - It costs some battery even when nothing is connected; we haven't measured
   how much. Turn it off for long days on battery.
 - The Bluetooth name shows in scans; the app finds the badge by its service
@@ -352,7 +358,12 @@ place than the factory one.
 - **Slots cycling on their own:** after the last slot, the button re-armed
   automatic cycling. Now it steps one slot per press and wraps around.
 - **Badge stuck in the menu after an upload,** behind a "BLUETOOTH OFF"
-  screen. It now shows the new slots straight away.
+  screen. It now shows the new slots straight away. It also boots into the
+  slots instead of the menu.
+- **Bluetooth stayed on after BT-PAIRING:** every disconnect switched
+  advertising back on, so after one visit to the BT-PAIRING menu the badge
+  stayed visible until the next reboot, even with always-on off. It now only
+  advertises again if always-on is on or you're still in BT-PAIRING.
 - **Startup animation:** off by default (`badgetool.py splash on` brings it
   back), so the badge is ready at once.
 - **Bluetooth crash under load:** `ng_notify()` freed the notification
