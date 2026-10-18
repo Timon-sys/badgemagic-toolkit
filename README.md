@@ -360,6 +360,10 @@ place than the factory one.
 - **Badge stuck in the menu after an upload,** behind a "BLUETOOTH OFF"
   screen. It now shows the new slots straight away. It also boots into the
   slots instead of the menu.
+- **Bluetooth animation after streaming:** with always-on off, stopping a
+  stream always brought up the BT-PAIRING animation, as if every stream had
+  started there. It now returns to your slots unless the badge really is in
+  BT-PAIRING.
 - **Full-width pictures blinked:** slot widths come in 8-column blocks, so
   a 44-column picture is stored as 48 columns. The still modes (fixed,
   up/down, drop, curtain, laser, animation) showed those 4 empty columns as
