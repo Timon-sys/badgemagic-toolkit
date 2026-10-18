@@ -25,6 +25,18 @@ same over USB and BLE.
 
 What you notice, and what you can do now that you couldn't before:
 
+- **Live streaming: show anything, live.** This is the reason I started
+  the project. The badge becomes a 44×11 display you can drive from a PC:
+  animations, a clock in your own design, game scores, notifications,
+  audio meters, whatever you can draw. Upload slots are fixed animations;
+  streaming shows whatever you send, frame by frame.
+  - **Over USB: about 60 fps.** FOSSASIA's streaming commands only worked
+    over Bluetooth; the patched firmware accepts them over USB too.
+  - **Over Bluetooth: about 20 to 34 fps** with the
+    [fast-BLE build](#which-file), wireless (FOSSASIA's firmware: about
+    2 fps).
+  - Try it: `badgetool.py stream picture.png`, or push frames from your
+    own code like [`ng/badge_display.py`](ng/badge_display.py) does.
 - **A display that doesn't flicker.** FOSSASIA's firmware refreshes
   the LEDs at about 45 Hz, and you can see the columns sweep across.
   The patched firmware runs at about **91 Hz**, twice as fast, and it's
@@ -33,9 +45,7 @@ What you notice, and what you can do now that you couldn't before:
 - **Always-on Bluetooth that actually works.** See [below](#always-on-bluetooth).
 - **Control everything from the PC, over USB or Bluetooth.** `badgetool.py`
   reads the battery voltage and the badge's settings, sets the clock,
-  brightness and Bluetooth name, uploads text and images, and streams live
-  pictures: about 60 fps over USB, and over Bluetooth about 20 fps with the
-  [fast-BLE build](#which-file) (FOSSASIA's firmware: about 2 fps).
+  brightness and Bluetooth name, and uploads text and images.
 - **The phone app works.** Uploads from the Badge Magic app were rejected
   unless you had switched on a PIN first; now they just work. Renaming the
   badge doesn't break the app either.
@@ -248,14 +258,17 @@ Two choices make four files:
 
 | File | `flash` name | LED wiring | Bluetooth | Tested on a badge |
 |---|---|---|---|---|
-| `badgemagic-ch582-2key.bin` | `normal` | normal | standard | no, builds only |
+| `badgemagic-ch582-2key.bin` | `normal` | normal | standard | ran on a PB6 board (all but line T); upstream-wired board untested |
 | `badgemagic-ch582-2key-pb6.bin` | `pb6` | PB6 | standard | yes, incl. a 150-frame Bluetooth stress test |
-| `badgemagic-ch582-2key-fastble.bin` | `normal-fastble` | normal | fast | no, builds only |
+| `badgemagic-ch582-2key-fastble.bin` | `normal-fastble` | normal | fast | same code as `pb6-fastble` but the pin; upstream-wired board untested |
 | `badgemagic-ch582-2key-pb6-fastble.bin` | `pb6-fastble` | PB6 | fast | yes, two badges, incl. the phone app (21 to 34 fps) |
 
-The `normal` builds differ from the `pb6` ones only in that one LED pin, so
-the risk is small, but they haven't run on real hardware yet. Reports
-welcome.
+The `normal` builds ran for weeks on our badges (an earlier version), and
+everything worked except the LEDs on line T, because both our badges are
+wired to PB6. What we couldn't test is a board actually wired the upstream
+way, where `normal` should show the whole display. If you have one, please
+[open an issue](https://github.com/Timon-sys/badgemagic-toolkit/issues) and
+say whether it worked.
 
 ### Flashing
 
