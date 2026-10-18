@@ -360,6 +360,11 @@ place than the factory one.
 - **Badge stuck in the menu after an upload,** behind a "BLUETOOTH OFF"
   screen. It now shows the new slots straight away. It also boots into the
   slots instead of the menu.
+- **Full-width pictures blinked:** slot widths come in 8-column blocks, so
+  a 44-column picture is stored as 48 columns. The still modes (fixed,
+  up/down, drop, curtain, laser, animation) showed those 4 empty columns as
+  a page of their own, and the display went dark every other page. A last
+  page that is only padding is skipped now; one lit column on it keeps it.
 - **Bluetooth stayed on after BT-PAIRING:** every disconnect switched
   advertising back on, so after one visit to the BT-PAIRING menu the badge
   stayed visible until the next reboot, even with always-on off. It now only

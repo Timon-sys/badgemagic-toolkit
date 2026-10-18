@@ -12,6 +12,105 @@ index a360b59..b4a2b7d 100644
  ifeq ($(HARDWARE_REV3), 1)
  CFLAGS += -DHARDWARE_REV3=$(HARDWARE_REV3)
  endif
+diff --git a/src/animation.c b/src/animation.c
+index cf4bb79..c7add0e 100644
+--- a/src/animation.c
++++ b/src/animation.c
+@@ -170,6 +170,22 @@ int ani_scroll_right(bm_t *bm, uint16_t *fb)
+ 	return ani_scroll_x(bm, fb, 1);
+ }
+ 
++/* Number of LED_COLS-wide pages the paged modes show. Widths arrive in
++ * 8-column blocks, so a full-width (44) picture is stored as 48 columns and
++ * its last page is only padding: shown as a page of its own, the display went
++ * dark every other page. Drop a last page that is partial and blank. */
++static int page_count(bm_t *bm)
++{
++	int frames = ALIGN(bm->width, LED_COLS) / LED_COLS;
++	if (frames <= 1 || bm->width % LED_COLS == 0)
++		return frames;
++	for (int i = (frames - 1) * LED_COLS; i < bm->width; i++) {
++		if (bm->buf[i])
++			return frames;
++	}
++	return frames - 1;
++}
++
+ /* Returns horizontal centering offset for a frame.
+  * Returns 0 if content fills the full width (no centering needed). */
+ static int get_x_offset(bm_t *bm, int frame)
+@@ -209,7 +225,7 @@ void ani_shift_y(bm_t *bm, uint16_t *fb, int y, int frame)
+ void ani_scroll_y(bm_t *bm, uint16_t *fb)
+ {
+ 	int frame_steps = LED_ROWS * 3; // in-still-out
+-	int frames = ALIGN(bm->width, LED_COLS) / LED_COLS;
++	int frames = page_count(bm);
+ 	int total_steps = frame_steps * frames;
+ 	int frame = mod(bm->anim_step, total_steps)/frame_steps;
+ 
+@@ -229,7 +245,7 @@ int ani_scroll_up(bm_t *bm, uint16_t *fb)
+ 	ani_scroll_y(bm, fb);
+ 
+ 	int frame_steps = LED_ROWS * 3; // in-still-out
+-	int frames = ALIGN(bm->width, LED_COLS) / LED_COLS;
++	int frames = page_count(bm);
+ 	int total_steps = frame_steps * frames;
+ 	bm->anim_step++;
+ 
+@@ -241,7 +257,7 @@ int ani_scroll_down(bm_t *bm, uint16_t *fb)
+ 	ani_scroll_y(bm, fb);
+ 
+ 	int frame_steps = LED_ROWS * 3; // in-still-out
+-	int frames = ALIGN(bm->width, LED_COLS) / LED_COLS;
++	int frames = page_count(bm);
+ 	int total_steps = frame_steps * frames;
+ 	bm->anim_step--;
+ 
+@@ -301,7 +317,7 @@ static void laser_out(bm_t *bm, uint16_t *fb, int step, int frame, int x_offset)
+ int ani_laser(bm_t *bm, uint16_t *fb)
+ {
+ 	int frame_steps = LED_COLS * 3; // in-still-out
+-	int frames = ALIGN(bm->width, LED_COLS) / LED_COLS;
++	int frames = page_count(bm);
+ 	int total_steps = frame_steps * frames;
+ 	int frame = mod(bm->anim_step, total_steps) / frame_steps;
+ 	int x_offset = get_x_offset(bm, frame);
+@@ -379,7 +395,7 @@ static void snowflake_out(bm_t *bm, uint16_t *fb, int step, int frame, int x_off
+ int ani_snowflake(bm_t *bm, uint16_t *fb)
+ {
+ 	int frame_steps = LED_ROWS * 6; // in-still-out, each costs 2xLED_ROWS step
+-	int frames = ALIGN(bm->width, LED_COLS) / LED_COLS;
++	int frames = page_count(bm);
+ 	int total_steps = frame_steps * frames;
+ 	int frame = mod(bm->anim_step, total_steps) / frame_steps;
+ 	int x_offset = get_x_offset(bm, frame);
+@@ -400,7 +416,7 @@ int ani_snowflake(bm_t *bm, uint16_t *fb)
+ int ani_animation(bm_t *bm, uint16_t *fb)
+ {
+ 	int frame_steps = ANI_ANIMATION_STEPS;
+-	int frames = ALIGN(bm->width, LED_COLS) / LED_COLS;
++	int frames = page_count(bm);
+ 	int total_steps = frame_steps * frames;
+ 	int frame = mod(bm->anim_step, total_steps)/frame_steps;
+ 
+@@ -414,7 +430,7 @@ int ani_animation(bm_t *bm, uint16_t *fb)
+ int ani_fixed(bm_t *bm, uint16_t *fb)
+ {
+ 	int frame_steps = ANI_FIXED_STEPS;
+-	int frames = ALIGN(bm->width, LED_COLS) / LED_COLS;
++	int frames = page_count(bm);
+ 	int total_steps = frame_steps * frames;
+ 	int frame = mod(bm->anim_step, total_steps)/frame_steps;
+ 
+@@ -472,7 +488,7 @@ int ani_picture(bm_t *bm, uint16_t *fb)
+ {
+ 	int last_steps = LED_COLS / 2;
+ 	int frame_steps = LED_COLS;
+-	int frames = ALIGN(bm->width, LED_COLS) / LED_COLS + 1;
++	int frames = page_count(bm) + 1;
+ 	int total_steps = frame_steps * frames - last_steps;
+ 	int frame = mod(bm->anim_step, frame_steps*frames)/frame_steps;
+ 	bm->anim_step++;
 diff --git a/src/ble/peripheral.c b/src/ble/peripheral.c
 index 7f657ae..6870b51 100644
 --- a/src/ble/peripheral.c
