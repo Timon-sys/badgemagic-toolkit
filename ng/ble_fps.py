@@ -11,6 +11,8 @@ each frame actually arrived on the badge, and counts frames that never did.
                  the PC queues frames, the notifications show the real pace
   --rate FPS     send at most FPS frames per second instead of back to back
   --no-notify    don't subscribe to the confirmations (times are PC side only)
+  --invert       everything lit with a dark bar sweeping: lit LEDs can disturb a
+                 badge's own radio, so this is the worst case
 """
 import argparse, asyncio, statistics, time
 from bleak import BleakClient
@@ -50,6 +52,18 @@ async def main(a):
         await asyncio.sleep(2.0)  # the badge asks for a faster interval 1 s after connecting
         arrivals.clear()
 
+        def save_csv():
+            # one row per frame: when the PC started the write, how long the write
+            # took, and when the badge confirmed it (empty if it never did)
+            if not a.csv:
+                return
+            with open(a.csv, "w") as f:
+                f.write("frame,sent_ms,write_ms,arrival_ms\n")
+                for i, (t0, t1) in enumerate(writes):
+                    arr = "%.2f" % ((arrivals[i] - t_start) * 1000) if i < len(arrivals) else ""
+                    f.write("%d,%.2f,%.2f,%s\n" % (i, (t0 - t_start) * 1000, (t1 - t0) * 1000, arr))
+
+        writes = []
         t_start = time.perf_counter()
         for i in range(a.frames):
             if a.rate:
@@ -57,8 +71,17 @@ async def main(a):
             cols = blank()
             cols[i % COLS] = 0x7FF
             cols[(i + 1) % COLS] = 0x7FF
-            await c.write_gatt_char(NG_WRITE, bytes([CMD_STREAM_BM]) + fb_bytes(cols),
-                                    response=not a.no_response)
+            if a.invert:
+                cols = [c ^ 0x7FF for c in cols]
+            t0 = time.perf_counter()
+            try:
+                await c.write_gatt_char(NG_WRITE, bytes([CMD_STREAM_BM]) + fb_bytes(cols),
+                                        response=not a.no_response)
+            except OSError as e:
+                print("link lost at frame %d, %.1f s in: %s" % (i, time.perf_counter() - t_start, e))
+                save_csv()
+                return
+            writes.append((t0, time.perf_counter()))
         sent = time.perf_counter() - t_start
         if a.no_notify:
             print("sent %d frames in %.2f s = %.1f fps (no notifications: PC side only)"
@@ -77,10 +100,7 @@ async def main(a):
         if got > 1:
             print("on the badge: %d frames in %.2f s = %.1f fps" % (got, total, got / total))
             report("time between frames on the badge", [b - x for x, b in zip(arrivals, arrivals[1:])])
-        if a.csv:
-            with open(a.csv, "w") as f:
-                f.write("frame,arrival_ms\n" + "".join(
-                    "%d,%.2f\n" % (i, (t - t_start) * 1000) for i, t in enumerate(arrivals)))
+        save_csv()
         await c.write_gatt_char(NG_WRITE, bytes([CMD_STREAM_SET, 0x01]), response=True)
 
 
@@ -89,6 +109,7 @@ ap.add_argument("address", nargs="?")
 ap.add_argument("--frames", type=int, default=120)
 ap.add_argument("--no-response", action="store_true")
 ap.add_argument("--rate", type=float)
+ap.add_argument("--invert", action="store_true", help="all LEDs on with a dark bar sweeping (worst case for the radio)")
 ap.add_argument("--no-notify", action="store_true", help="don't ask the badge to confirm frames")
 ap.add_argument("--csv")
 asyncio.run(main(ap.parse_args()))
