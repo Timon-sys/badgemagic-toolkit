@@ -208,7 +208,7 @@ firmware.
 | `battery.py`, `set_time.py`, `set_brightness.py` | single settings over USB |
 | `ble_always_on.py`, `fix_alwayson.py`, `apply_cfg.py` | config + reboot (`apply_cfg.py` resets to defaults, including the name) |
 | `ble_check.py` | connect over BLE and list services; optional address argument |
-| `ble_fps.py`, `ble_ng_test.py` | BLE streaming speed and `ng` commands over BLE (`ble_ng_test.py` leaves brightness at 3 until the next reboot) |
+| `ble_fps.py`, `ble_ng_test.py` | BLE streaming speed (`ble_fps.py --invert` is the worst case with nearly every LED lit, `--csv` logs every frame) and `ng` commands over BLE (`ble_ng_test.py` leaves brightness at 3 until the next reboot) |
 
 ## The patched firmware
 
@@ -360,6 +360,17 @@ place than the factory one.
 - **Badge stuck in the menu after an upload,** behind a "BLUETOOTH OFF"
   screen. It now shows the new slots straight away. It also boots into the
   slots instead of the menu.
+- **Bluetooth "breathing" and dropped links:** the LED timer ticks every
+  125 µs, and every Bluetooth connection interval is a multiple of 1.25 ms,
+  so the radio events kept landing on the same point of the LED cycle and only
+  drifted by the tiny crystal difference between badge and PC. Each time they
+  drifted across the LED switching, packets got lost for seconds: streaming
+  sped up and slowed down every 13 to 19 seconds (each badge has its own
+  period), and with many LEDs lit the link dropped. The LED timer period now
+  varies by up to 2 % per tick, which you can't see, so the interference is
+  spread evenly. The fast-Bluetooth builds also ask for a 4-second supervision
+  timeout instead of 1 second. With nearly every LED lit, streaming now runs
+  at a steady 5 fps instead of 1.5 fps with dropped links.
 - **Bluetooth animation after streaming:** with always-on off, stopping a
   stream always brought up the BT-PAIRING animation, as if every stream had
   started there. It now returns to your slots unless the badge really is in
