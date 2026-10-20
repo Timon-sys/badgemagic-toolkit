@@ -62,7 +62,9 @@ What you notice, and what you can do now that you couldn't before:
   (`badgetool.py time`).
 - **The battery voltage on the charging screen**, and a charging screen that
   lets the badge finish booting after 5 seconds instead of waiting for a
-  button press forever.
+  button press forever. You can shorten it or switch it off
+  (`badgetool.py charging-screen 0`); with the startup animation off too,
+  the badge boots straight to your slots.
 - **Calmer buttons.** The button nearest USB steps one slot per press (the
   slots no longer start cycling on their own), a long press on the other
   button changes brightness, and the badge shows your slots straight away
@@ -156,6 +158,7 @@ python badgetool.py text "Hello" "Second slot" --mode center
 | `ble on\|off` | always-on Bluetooth (badge reboots) |
 | `name "NAME"` | Bluetooth name, max 20 characters (badge reboots) |
 | `splash on\|off` | startup animation |
+| `charging-screen 0-60` | seconds the charging screen shows at boot (default 5); 0 boots straight to the slots |
 | `text MSG [MSG ...]` | one message per slot; options `--mode --speed --blink --border --font thin\|app --preview` |
 | `upload config.toml` | a full Badge Magic config file (see below) |
 | `image pic.png [--invert]` | static image in slot 1; dark pixels light up, `--invert` for light ones |
@@ -470,7 +473,7 @@ place than the factory one.
 - **USB HID replies dropped every other time:** the OUT handler no longer arms
   a zero-length IN, which knocked the data toggle out of step.
 - **Stuck on the charging animation when plugged in:** the screen now leaves
-  after 5 s or on a key press. The config is loaded before this screen, so a
+  after 5 s (adjustable, see Additions) or on a key press. The config is loaded before this screen, so a
   reboot while charging no longer saves zeros.
 - **Bluetooth pairing menu:** leaving it no longer leaves the BLE animation
   fighting with the menu.
@@ -496,7 +499,10 @@ place than the factory one.
   ![Charging screen with the battery voltage](pictures/badge-charging-screen-voltage.jpg)
 
 - `ng` misc commands: set time (2), battery reply `BAT` (3), status reply
-  `STA` (4).
+  `STA` (4), charging screen seconds (5).
+- The charging screen at boot is a setting: 0 to 255 seconds, default 5,
+  0 skips it. Settings saved by older builds are taken over when you update
+  (the new field defaults to 5 s), so nothing resets.
 - The firmware names itself after the toolkit release: `status` and the
   Bluetooth device info show `v0.1-toolkit-1.3.0` (upstream base, then the
   toolkit version) instead of the git description, which was the same for
@@ -547,7 +553,10 @@ The serial port ignores the baud rate; any setting works.
 
 `ng` commands: next packet (0), power (1), stream set (2), stream bitmap (3),
 BLE settings (4), splash screen upload (5), save (6), load defaults (7),
-misc (8: splash speed, brightness, time, battery, status).
+misc (8: splash speed, brightness, time, battery, status, charging screen).
+The `STA` reply is layout 2 since 1.3.0: byte 63 holds the charging screen
+seconds, and the version string before it is cut to 19 characters, so
+readers of layout 1 (which stop at its NUL) keep working.
 
 The Badge Magic app finds badges by the advertised service `0xFEE0`, so
 renaming a badge keeps it compatible with the app.

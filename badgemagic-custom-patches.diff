@@ -215,7 +215,7 @@ index 5687d5b..d4cd66a 100644
  }
  
 diff --git a/src/config.c b/src/config.c
-index 82b0650..e2272f7 100644
+index 82b0650..0ff5bf1 100644
 --- a/src/config.c
 +++ b/src/config.c
 @@ -3,6 +3,7 @@
@@ -272,7 +272,12 @@ index 82b0650..e2272f7 100644
  
  	int splash_size = ALIGN_1BYTE(splash.w) * splash.h;
  	memcpy(badge_cfg.splash_bm_bits, splash.bits, splash_size);
-@@ -41,7 +62,7 @@ void cfg_fallback()
+@@ -37,11 +58,12 @@ void cfg_fallback()
+ 
+ 	badge_cfg.reset_rx = FALSE;
+ 	badge_cfg.ble_security = 0;  // insecure by default
++	badge_cfg.charging_screen_s = 5;
+ }
  
  void cfg_update_crc(badge_cfg_t *cfg)
  {
@@ -281,7 +286,7 @@ index 82b0650..e2272f7 100644
  	PRINT(__func__);
  	PRINT(": crc: %02X\n", cfg->crc);
  }
-@@ -51,17 +72,24 @@ int cfg_writeflash(uint16_t flash_offs, badge_cfg_t *cfg)
+@@ -51,17 +73,24 @@ int cfg_writeflash(uint16_t flash_offs, badge_cfg_t *cfg)
  	if (flash_offs + CFG_SIZE > EEPROM_MAX_SIZE) {
  		return -1;
  	}
@@ -310,6 +315,48 @@ index 82b0650..e2272f7 100644
  }
  
  int cfg_readflash_def(badge_cfg_t *cfg)
+@@ -74,10 +103,29 @@ int cfg_writeflash_def(badge_cfg_t *cfg)
+ 	return cfg_writeflash(CFG_DEF_FLASH_OFFS, cfg);
+ }
+ 
++/* Configs saved before charging_screen_s existed are one byte shorter, so
++ * their CRC sits where the new field is now. Take them over instead of
++ * falling back to defaults, which would lose the name and every setting. */
++#define CFG_SIZE_NO_CHARGING (CFG_SIZE - 1)
++
++static int cfg_read_no_charging(badge_cfg_t *cfg)
++{
++	int ret = EEPROM_READ(CFG_DEF_FLASH_OFFS, cfg_buf, CFG_SIZE_NO_CHARGING);
++	if (ret)
++		return ret;
++	if (cfg_crc((uint8_t *)cfg_buf, CFG_SIZE_NO_CHARGING))
++		return -1;
++	memcpy(cfg, cfg_buf, CFG_SIZE_NO_CHARGING - 1);	/* without its CRC */
++	cfg->charging_screen_s = 5;
++	return 0;
++}
++
+ void cfg_init()
+ {
+ 	badge_cfg_t cfg;
+ 	int r = cfg_readflash_def(&cfg);
++	if (r && cfg_read_no_charging(&cfg) == 0)
++		r = 0;
+ 	if (r) {
+ 		cfg_fallback();
+ 		PRINT("configuration falling back: %02x\n", r);
+diff --git a/src/config.h b/src/config.h
+index 768fbe5..ec9342c 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -29,6 +29,7 @@ typedef struct {
+ 	uint16_t splash_speedT;
+ 	uint8_t reset_rx; // Reset after bitmap received
+ 	uint8_t ble_security;  // 1 = require PIN for BLE transfers, 0 = open
++	uint8_t charging_screen_s; // boot charging screen in seconds, 0 = skip it
+ 
+ 	uint8_t crc;
+ } __attribute__((packed)) badge_cfg_t;
 diff --git a/src/data.c b/src/data.c
 index aa3e93f..bd367f5 100644
 --- a/src/data.c
@@ -515,7 +562,7 @@ index ca7d0c6..4b90829 100644
  void legacy_set_auth_code(uint16_t code);  // called from main.c on BT-PAIRING entry
  void legacy_reset_auth();                   // called from peripheral.c on disconnect
 diff --git a/src/main.c b/src/main.c
-index 7b4b3c6..b851405 100644
+index 7b4b3c6..d23ee1b 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -26,6 +26,7 @@
@@ -806,7 +853,7 @@ index 7b4b3c6..b851405 100644
      btn_onOnePress(KEY1, menu_up);
      btn_onOnePress(KEY2, menu_down);
  #if HW_KEY_COUNT == 4
-@@ -766,23 +818,61 @@ void return_to_menu()
+@@ -766,23 +818,63 @@ void return_to_menu()
      disp_menu();
  }
  
@@ -841,16 +888,18 @@ index 7b4b3c6..b851405 100644
 +}
 +
 +/* The boot charging screen holds up everything after it, BLE included, so
-+ * it gives up on its own after this long (a key press still skips it). */
-+#define CHARGING_SCREEN_MS	5000
-+
++ * it gives up on its own after badge_cfg.charging_screen_s (a key press still
++ * skips it). 0 skips it altogether. */
  static void disp_charging()
  {
  	int blink = 0;
 -	while (1) {
 -		btn_tick();
 -		int percent = batt_raw2percent(batt_raw());
-+	for (int shown = 0; shown < CHARGING_SCREEN_MS; shown += 500) {
++	int ms = badge_cfg.charging_screen_s * 1000;
++	if (ms == 0)
++		return;
++	for (int shown = 0; shown < ms; shown += 500) {
 +		int raw = batt_raw();
 +		int percent = batt_raw2percent(raw);
  
@@ -867,7 +916,7 @@ index 7b4b3c6..b851405 100644
 -			DelayMs(500);
 +			/* Upstream only left this screen when charging stopped, so on
 +			 * USB power the badge was stuck here until replugged (and BLE
-+			 * never came up). Now: key press or CHARGING_SCREEN_MS. */
++			 * never came up). Now: key press or charging_screen_s. */
 +			if (wait_or_key(500))
 +				return;
  		} else {
@@ -876,7 +925,7 @@ index 7b4b3c6..b851405 100644
  			DelayMs(500);
  			return;
  		}
-@@ -802,18 +892,34 @@ void reload_bmlist()
+@@ -802,18 +894,34 @@ void reload_bmlist()
  	load_bmlist();
  }
  
@@ -913,7 +962,7 @@ index 7b4b3c6..b851405 100644
      fb_puts_small("BLUETOOTH", 9, 4, 0);
      fb_puts_small("OFF", 3, 4, 6);
  }
-@@ -827,9 +933,12 @@ void handle_after_rx()
+@@ -827,9 +935,12 @@ void handle_after_rx()
          tmos_stop_task(common_taskid, STOPWATCH_TICK);
          sw_state = SW_STOPPED;
          clock_active = 0;
@@ -929,7 +978,7 @@ index 7b4b3c6..b851405 100644
      }
  }
  
-@@ -840,12 +949,15 @@ int main()
+@@ -840,12 +951,15 @@ int main()
  	debug_init();
  	PRINT("\nDebug console is on UART%d\n", DEBUG);
  
@@ -948,7 +997,7 @@ index 7b4b3c6..b851405 100644
  	TMR0_ITCfg(ENABLE, TMR0_3_IT_CYC_END);
  	PFIC_EnableIRQ(TMR0_IRQn);
  
-@@ -863,19 +975,34 @@ int main()
+@@ -863,19 +977,34 @@ int main()
  #endif
  
  	power_init();
@@ -985,7 +1034,7 @@ index 7b4b3c6..b851405 100644
  
  	spawn_tasks();
  	btn_init_task();
-@@ -887,10 +1014,12 @@ int main()
+@@ -887,10 +1016,12 @@ int main()
  	pong_init();
  	stop_all_animation();
  
@@ -1000,7 +1049,7 @@ index 7b4b3c6..b851405 100644
  	}
  }
  
-@@ -899,20 +1028,36 @@ __HIGH_CODE
+@@ -899,20 +1030,36 @@ __HIGH_CODE
  void TMR0_IRQHandler(void)
  {
  	static int i;
@@ -1041,7 +1090,7 @@ index 7b4b3c6..b851405 100644
  }
 \ No newline at end of file
 diff --git a/src/ngctrl.c b/src/ngctrl.c
-index b5a687e..e6eb8b5 100644
+index b5a687e..9b2a8bb 100644
 --- a/src/ngctrl.c
 +++ b/src/ngctrl.c
 @@ -8,6 +8,11 @@
@@ -1067,7 +1116,22 @@ index b5a687e..e6eb8b5 100644
  	if (ms < SPLASH_MIN_SPEED_T)
  		return -1;
  
-@@ -161,6 +168,72 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
+@@ -148,6 +155,14 @@ static uint8_t cfg_splash_speed(uint8_t *val, uint16_t len)
+ 	return 0;
+ }
+ 
++/* Seconds the boot charging screen stays up, 0 = skip it. Save to keep. */
++static uint8_t cfg_charging_screen(uint8_t *val, uint16_t len)
++{
++	if (len < 1) return -2;
++	badge_cfg.charging_screen_s = val[0];
++	return 0;
++}
++
+ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
+ {
+ 	PRINT(__func__);
+@@ -161,6 +176,75 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
  	return 0;
  }
  
@@ -1101,16 +1165,18 @@ index b5a687e..e6eb8b5 100644
 +extern volatile int in_charging_screen;
 +
 +/* Everything the badge can tell about itself, as one 64-byte HID IN report
-+ * (layout v1, little endian; badgetool.py parses it):
++ * (layout v2, little endian; badgetool.py parses it):
 + *  0 'STA'  3 layout version  4 ble_always_on  5 led_brightness
 + *  6 splash_speedT u16  8 reset_rx  9 ble_security  10 ble_devname[20]
 + * 30 year u16  32 mon  33 day  34 hour  35 min  36 sec
 + * 37 batt raw u16  39 batt mV u16  41 charging  42 mode
 + * 43 flags: bit0 streaming, bit1 still on the boot charging screen
-+ * 44 VERSION, NUL padded (truncated to 20 chars) */
++ * 44 VERSION, NUL padded (truncated to 19 chars)
++ * 63 charging screen seconds (new in v2; v1 allowed 20 version chars, but
++ *    readers stop at the NUL, so v1 readers keep working) */
 +static uint8_t cfg_status(uint8_t *val, uint16_t len)
 +{
-+	uint8_t r[64] = { 'S', 'T', 'A', 1 };
++	uint8_t r[64] = { 'S', 'T', 'A', 2 };
 +	uint16_t y, mo, d, h, mi, sec;
 +	int raw = batt_raw();
 +	int mv = batt_raw2mv(raw);
@@ -1131,8 +1197,9 @@ index b5a687e..e6eb8b5 100644
 +	r[42] = mode;
 +	r[43] = (streaming_enabled ? 1 : 0) | (in_charging_screen ? 2 : 0);
 +	const char *v = VERSION;
-+	for (int i = 0; i < 20 && v[i]; i++)
++	for (int i = 0; i < 19 && v[i]; i++)
 +		r[44 + i] = v[i];
++	r[63] = badge_cfg.charging_screen_s;
 +	ng_reply(r, sizeof(r));
 +	return 0;
 +}
@@ -1140,17 +1207,18 @@ index b5a687e..e6eb8b5 100644
  uint8_t misc(uint8_t *val, uint16_t len)
  {
  	PRINT(__func__);
-@@ -170,6 +243,9 @@ uint8_t misc(uint8_t *val, uint16_t len)
+@@ -170,6 +254,10 @@ uint8_t misc(uint8_t *val, uint16_t len)
  	const uint8_t (*misc_cmd[])(uint8_t *, uint16_t) = {
  		cfg_splash_speed,
  		cfg_led_brightness,
 +		cfg_set_time,
 +		cfg_battery,
 +		cfg_status,
++		cfg_charging_screen,
  	};
  
  	uint8_t fn = val[0];
-@@ -194,6 +270,100 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
+@@ -194,6 +282,100 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
  
  #define CMD_LUT_LEN (sizeof(cmd_lut) / sizeof(cmd_lut[0]))
  

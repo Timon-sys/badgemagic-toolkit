@@ -10,6 +10,7 @@ Run without arguments for an interactive menu, or use a command:
   python badgetool.py ble on|off                always-on Bluetooth (reboots)
   python badgetool.py name "My Badge"           Bluetooth name, max 20 chars (reboots)
   python badgetool.py splash on|off             startup animation
+  python badgetool.py charging-screen 0-60      seconds it shows at boot, 0 = boot straight to the slots
   python badgetool.py text "Hi" "Second slot"   one message per slot (USB or BLE)
   python badgetool.py upload config.toml        full badgemagic config file
   python badgetool.py image pic.png [--invert]  static image into slot 1 (dark = lit)
@@ -67,7 +68,7 @@ COLS, ROWS = 44, 11
 # ng protocol (custom firmware only)
 CMD_POWER, CMD_STREAM_SET, CMD_STREAM_BM, CMD_BLE = 1, 2, 3, 4
 CMD_SAVE, CMD_MISC = 6, 8
-MISC_SPLASH, MISC_BRIGHTNESS, MISC_TIME, MISC_BATTERY, MISC_STATUS = 0, 1, 2, 3, 4
+MISC_SPLASH, MISC_BRIGHTNESS, MISC_TIME, MISC_BATTERY, MISC_STATUS, MISC_CHARGING = 0, 1, 2, 3, 4, 5
 MODES = ["menu", "slots", "BT download", "clock", "game", "power off"]
 
 
@@ -307,8 +308,11 @@ class Badge:
     def status(self):
         r = self.ng_query(bytes([CMD_MISC, MISC_STATUS]), b"STA")
         y = struct.unpack_from("<H", r, 30)[0]
+        layout = r[3]
         return {
-            "firmware": r[44:64].split(b"\0")[0].decode(errors="replace"),
+            "firmware": r[44:63 if layout >= 2 else 64].split(b"\0")[0].decode(errors="replace"),
+            # layout 2 (firmware 1.3.0) added it; None = firmware too old to have the setting
+            "charging_screen_s": r[63] if layout >= 2 else None,
             "ble_always_on": bool(r[4]),
             "brightness": r[5],
             "splash_ms": struct.unpack_from("<H", r, 6)[0],
@@ -804,6 +808,7 @@ battery        {s['batt_mv']/1000:.3f} V  raw {s['batt_raw']}  {'charging' if s[
 brightness     {s['brightness']} / 3
 bluetooth      name "{s['ble_name']}", always-on {'yes' if s['ble_always_on'] else 'no'}, PIN {'on' if s['ble_security'] else 'off'}
 startup anim   {'off' if s['splash_ms'] == 0 else str(s['splash_ms']) + ' ms/frame'}
+charging scr   {'(needs firmware 1.3.0)' if s['charging_screen_s'] is None else 'off, boots straight to the slots' if s['charging_screen_s'] == 0 else str(s['charging_screen_s']) + ' s at boot'}
 reset on rx    {'yes' if s['reset_after_upload'] else 'no'}""")
 
 
@@ -874,6 +879,16 @@ def cmd_splash(a):
     b.save()
     b.close()
     print(f"startup animation {a.state}, saved")
+
+
+def cmd_charging(a):
+    b = open_one(a)
+    b.ng(bytes([CMD_MISC, MISC_CHARGING, a.seconds]))
+    time.sleep(0.2)
+    b.save()
+    b.close()
+    print("charging screen " + ("off: the badge boots straight to the slots"
+                                if a.seconds == 0 else f"{a.seconds} s at boot") + ", saved")
 
 
 def preview_blocks(data, width=None):
@@ -1126,6 +1141,8 @@ def _menu():
         ("Bluetooth always-on", lambda: cmd_ble(ns(state=ask("on/off: ", ("on", "off"))))),
         ("Bluetooth name", lambda: cmd_name(ns(name=input("new name (max 20): ").strip()))),
         ("startup animation", lambda: cmd_splash(ns(state=ask("on/off: ", ("on", "off"))))),
+        ("charging screen at boot", lambda: cmd_charging(ns(seconds=int(ask(
+            "seconds 0-60 (0 = boot straight to the slots): ", tuple(map(str, range(61)))))))),
         ("upload text (replaces all slots)", menu_text),
         ("upload config.toml", menu_upload),
         ("upload image", lambda: cmd_image(ns(file=input("image path: ").strip('" '),
@@ -1200,6 +1217,8 @@ def main():
     s = sub.add_parser("ble"); s.add_argument("state", choices=["on", "off"]); s.set_defaults(f=cmd_ble)
     s = sub.add_parser("name"); s.add_argument("name"); s.set_defaults(f=cmd_name)
     s = sub.add_parser("splash"); s.add_argument("state", choices=["on", "off"]); s.set_defaults(f=cmd_splash)
+    s = sub.add_parser("charging-screen", help="seconds the charging screen shows at boot, 0 = skip")
+    s.add_argument("seconds", type=int, choices=range(61), metavar="0-60"); s.set_defaults(f=cmd_charging)
     s = sub.add_parser("text"); s.add_argument("messages", nargs="+")
     s.add_argument("--mode", default="left",
                    choices=["left", "right", "up", "down", "center", "fast", "drop", "curtain", "laser"])
