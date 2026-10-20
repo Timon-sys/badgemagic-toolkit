@@ -1,11 +1,48 @@
 # Your slots: edit this, then  python badgetool.py upload config.toml  (or use the menu)
+# Up to 8 messages, one per slot. Each one below shows off a different effect.
+#
+#   mode    left right up down center fast drop curtain laser
+#           (fast = page by page, 44 columns at a time; drop = falling pixels)
+#   speed   0-7, 7 = fastest
+#   blink   true / false   flashes the whole slot
+#   border  true / false   running border around it
+#   image   "pic.png" instead of text: 11 rows high, dark pixels light up
+
 [[message]]
-text = "HELLO"
+text = "Hello! I scroll left <<"
+mode = "left"
+speed = 5
+
+[[message]]
+text = "and I scroll right >>"
+mode = "right"
+speed = 5
+
+[[message]]
+text = "up ^"
+mode = "up"
+speed = 4
+
+[[message]]
+text = "down v"
+mode = "down"
+speed = 4
+
+[[message]]
+text = "center"
 mode = "center"
 
 [[message]]
-text = "scrolling text"
-mode = "left"
-speed = 6
-border = false
-blink = false
+text = "drop"
+mode = "drop"
+speed = 5
+
+[[message]]
+text = "curtain"
+mode = "curtain"
+speed = 4
+
+[[message]]
+text = "laser"
+mode = "laser"
+speed = 5

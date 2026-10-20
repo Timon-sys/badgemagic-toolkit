@@ -171,7 +171,8 @@ interactive menu or the phone app, before you scan.
 
 ### Config file
 
-Your slots live in `config.toml`, which comes with two example messages.
+Your slots live in `config.toml`, which comes with eight example messages,
+one per scroll effect.
 Edit it, then run `python badgetool.py upload config.toml` or use the menu.
 The format is the same as the official `badgemagic` CLI's:
 
