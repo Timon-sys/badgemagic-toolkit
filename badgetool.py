@@ -519,7 +519,7 @@ class SerialBadge(Badge):
 
     Same commands as HID: ng frames go out as a plain byte stream (no 64-byte
     padding) and status/battery replies come back on the port. Needs the
-    firmware from 2026-10-20 or later; older builds can't be opened on Windows
+    firmware 1.3.0 or later ('status' shows v0.1-toolkit-1.3.0); older builds can't be opened on Windows
     (error 31) and only reply over HID.
     """
 
@@ -531,7 +531,7 @@ class SerialBadge(Badge):
         try:
             self.s = serial.Serial(port, 115200, timeout=1.0)  # the baud rate is ignored
         except serial.SerialException as e:
-            raise RuntimeError(f"can't open {port}: {e}. Firmware older than 2026-10-20 "
+            raise RuntimeError(f"can't open {port}: {e}. Firmware older than toolkit 1.3.0 "
                                "can't be opened on Windows ('badgetool.py flash')")
         self.port = port
         self.kind = "custom"  # the stock firmwares have no serial interface we can use
@@ -556,7 +556,7 @@ class SerialBadge(Badge):
         r = self.s.read(64)
         if r[:3] != magic:
             raise RuntimeError("no reply over serial; replies over serial need the firmware "
-                               "from 2026-10-20 or later ('badgetool.py flash')")
+                               "1.3.0 or later ('badgetool.py flash')")
         return r
 
     def upload_slots(self, slots):
@@ -993,7 +993,8 @@ def cmd_flash(a):
     if not WCHISP:
         sys.exit("wchisp not found: get it from https://github.com/ch32-rs/wchisp/releases "
                  "and put it in tools/ or on your PATH")
-    print("Put the badge in ISP mode: unplug, hold the button nearest USB, plug in.")
+    print("Put the badge in ISP mode. Patched firmware: hold the button nearest USB for 2-3 s.")
+    print("Factory firmware: power it up from nothing with that button held (see README, Flashing).")
     print("Waiting up to 5 minutes ...")
     end = time.time() + 300
     while time.time() < end:

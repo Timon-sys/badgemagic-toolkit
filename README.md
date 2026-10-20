@@ -48,11 +48,11 @@ What you notice, and what you can do now that you couldn't before:
   brightness and Bluetooth name, and uploads text and images.
 - **A USB serial port that works, on Windows too.** Besides HID, the badge
   has a serial port (COM port / `/dev/ttyACM*`). FOSSASIA's firmware ignored
-  the requests Windows sends when it opens a port, so it could only be used
-  on Linux, and nothing listened on it anyway. Now every command works over
-  it, at the same speed as HID (`badgetool.py --serial`). Handy where HID is
-  awkward: a terminal, a microcontroller, a phone, or a Linux box without
-  hidapi.
+  the requests Windows sends when it opens a port, so Windows couldn't use
+  it, and on Linux it only took the legacy upload. Now every command works
+  over it, at the same speed as HID (`badgetool.py --serial`). Handy where
+  HID is awkward: a terminal, a microcontroller, a phone, or a Linux box
+  without hidapi.
 - **The phone app works.** Uploads from the Badge Magic app were rejected
   unless you had switched on a PIN first; now they just work. Renaming the
   badge doesn't break the app either.
@@ -132,7 +132,8 @@ The CH582 board in these pictures is revision `B1144C_240525`. Look for the
   USB serial was also tested on Ubuntu 26.04. On Linux, install
   [`linux/99-badgemagic.rules`](linux/99-badgemagic.rules) (instructions
   inside) to use the badge without `sudo`. It also keeps ModemManager away
-  from the serial port, whose probing would garble the commands.
+  from the serial port, whose probing would garble the commands. Only the
+  serial-port rule has been tested so far; the HID and ISP rules haven't.
 
 ## Quick start
 
@@ -176,14 +177,17 @@ python badgetool.py status --serial COM36            # or /dev/ttyACM0
 ```
 
 The options also work after the command (`badgetool.py text Hi --ble`).
+
 Over USB serial everything works the same as over HID, including `status`,
 `battery` and the reboots (it waits for the port to come back). It needs
-the patched firmware from 2026-10-20 or later: on Windows, older builds
-can't be opened at all.
+the patched firmware 1.3.0 or later (`status` shows `v0.1-toolkit-1.3.0`;
+older builds show `v0.1-64-gb2137f0-dirty`): older builds can't be opened on
+Windows at all, and on Linux they never answer `status` or `battery`.
+
 You can do everything over BLE except `flash`. Over BLE, `status` and
-`battery` show only the battery percentage and device info for now. A badge that is
-connected stops advertising, so close other BLE sessions, such as the
-interactive menu or the phone app, before you scan.
+`battery` show only the battery percentage and device info for now. A badge
+that is connected stops advertising, so close other BLE sessions, such as
+the interactive menu or the phone app, before you scan.
 
 ### Config file
 
@@ -227,8 +231,7 @@ Both APIs need a secure context: `localhost`, a `file://` page or `https://`.
 It's a single file, so to use it from a phone, put `index.html` on any web
 server that has HTTPS. A self-signed certificate is fine: click through the
 warning once and Web Bluetooth works. Factory-firmware badges get text and
-images only. Over
-Bluetooth the status shows the battery percentage and firmware, like
+images only. Over Bluetooth the status shows the battery percentage and firmware, like
 `badgetool.py`.
 
 `index.html` is built from `panel.src.html` by `python build.py`, which copies
@@ -248,7 +251,7 @@ firmware.
 | `badge_display.py` | push PIL images to the badge as a live 44×11 display |
 | `test_stream.py` | streaming test patterns, measures USB frame rate (~60 fps) |
 | `test_serial.py` | the same over USB serial; optional port argument |
-| `screen_mirror.py` | mirrors the screen (or the area around the mouse) live; several badges stack into one taller display. All options are in `CONFIG` at the top and on the command line |
+| `screen_mirror.py` | Windows only: mirrors the screen (or the area around the mouse) live; several badges stack into one taller display. All options are in `CONFIG` at the top and on the command line |
 | `battery.py`, `set_time.py`, `set_brightness.py` | single settings over USB |
 | `ble_always_on.py`, `fix_alwayson.py`, `apply_cfg.py` | config + reboot (`apply_cfg.py` resets to defaults, including the name) |
 | `ble_check.py` | connect over BLE and list services; optional address argument |
@@ -302,16 +305,16 @@ Two choices make four files:
   [Fixes](#fixes)), flash `pb6`; nothing breaks either way.
 - **Bluetooth speed:** the `fastble` builds ask for a 15 to 30 ms connection
   interval and use a bigger packet size (MTU 96), so live streaming over
-  Bluetooth runs at about 20 fps instead of about 2. That costs more battery,
+  Bluetooth runs at 20 to 30 fps instead of about 4. That costs more battery,
   but only while something is connected. Uploads, the phone app and
   everything else work the same in both.
 
 | File | `flash` name | LED wiring | Bluetooth | Tested on a badge |
 |---|---|---|---|---|
 | `badgemagic-ch582-2key.bin` | `normal` | normal | standard | ran on a PB6 board (all but line T); upstream-wired board untested |
-| `badgemagic-ch582-2key-pb6.bin` | `pb6` | PB6 | standard | yes, incl. a 150-frame Bluetooth stress test |
+| `badgemagic-ch582-2key-pb6.bin` | `pb6` | PB6 | standard | yes: USB HID, serial and Bluetooth (every command; streaming 4 fps, 150/150 frames) |
 | `badgemagic-ch582-2key-fastble.bin` | `normal-fastble` | normal | fast | same code as `pb6-fastble` but the pin; upstream-wired board untested |
-| `badgemagic-ch582-2key-pb6-fastble.bin` | `pb6-fastble` | PB6 | fast | yes, two badges, incl. the phone app (21 to 34 fps) |
+| `badgemagic-ch582-2key-pb6-fastble.bin` | `pb6-fastble` | PB6 | fast | yes: USB HID, serial and Bluetooth (every command; streaming 30 fps, 23 fps with nearly every LED lit, 300/300 frames); the phone app (21 to 34 fps) on two badges with v1.2.1 |
 
 The `normal` builds ran for weeks on our badges (an earlier version), and
 everything worked except the LEDs on line T, because both our badges are
@@ -437,6 +440,11 @@ place than the factory one.
   advertising back on, so after one visit to the BT-PAIRING menu the badge
   stayed visible until the next reboot, even with always-on off. It now only
   advertises again if always-on is on or you're still in BT-PAIRING.
+- **Crash on `splash` over Bluetooth:** the splash-speed command read its
+  16-bit value through a pointer that is odd-aligned when the command comes
+  over Bluetooth. This core faults on misaligned loads, so the badge reset
+  (and lost its clock) every time. Over USB the buffer happened to be
+  aligned. It reads the two bytes separately now.
 - **Startup animation:** off by default (`badgetool.py splash on` brings it
   back), so the badge is ready at once.
 - **Bluetooth crash under load:** `ng_notify()` freed the notification
@@ -489,6 +497,10 @@ place than the factory one.
 
 - `ng` misc commands: set time (2), battery reply `BAT` (3), status reply
   `STA` (4).
+- The firmware names itself after the toolkit release: `status` and the
+  Bluetooth device info show `v0.1-toolkit-1.3.0` (upstream base, then the
+  toolkit version) instead of the git description, which was the same for
+  every build here.
 - `ng` commands over USB serial: frames as a plain byte stream (back to back,
   split across USB packets any way the host likes), with the `STA`/`BAT`
   replies on the same port. Legacy uploads work over serial too.
@@ -518,6 +530,7 @@ BUILD_DIR=usb-c-2key KEY_COUNT=2 make                  # normal build
 BUILD_DIR=usb-c-2key-t6 KEY_COUNT=2 LED_T_PB6=1 make   # pb6 build
 ```
 
+The version string comes from `TOOLKIT_VERSION` in the patched `Makefile`.
 The result is `<BUILD_DIR>/badgemagic-ch582.bin`, and a clean checkout with
 the patches builds byte-identical copies of the files in `firmware/`. Flash it
 with `badgetool.py flash path/to/badgemagic-ch582.bin`.
@@ -532,8 +545,9 @@ with `badgetool.py flash path/to/badgemagic-ch582.bin`.
 
 The serial port ignores the baud rate; any setting works.
 
-`ng` commands: power (1), stream set (2), stream bitmap (3), BLE settings (4),
-save (6), misc (8: splash, brightness, time, battery, status).
+`ng` commands: next packet (0), power (1), stream set (2), stream bitmap (3),
+BLE settings (4), splash screen upload (5), save (6), load defaults (7),
+misc (8: splash speed, brightness, time, battery, status).
 
 The Badge Magic app finds badges by the advertised service `0xFEE0`, so
 renaming a badge keeps it compatible with the app.
@@ -558,8 +572,8 @@ renaming a badge keeps it compatible with the app.
   hold. Set the clock with `badgetool.py time` when you need it; fixing it
   would mean recalibrating periodically or correcting the RTC in software.
 - **Upstream pull requests:** several fixes (config storage, the HID reply
-  bug, `LED_T_PB6`, the blips, the charging screen) would be useful for
-  FOSSASIA too.
+  bug, the USB serial port, `LED_T_PB6`, the blips, the charging screen)
+  would be useful for FOSSASIA too.
 
 ## Credits and licences
 
