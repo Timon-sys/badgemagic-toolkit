@@ -813,16 +813,28 @@ def toml_speed(m, path):
     return sp
 
 
+def toml_data(m, path, font):
+    """A message's 11-byte blocks: its text, or `image = "pic.png"` (path relative to
+    the toml file; dark = lit, `invert = true` for light, centred like 'image')."""
+    if "image" in m:
+        pic = os.path.join(os.path.dirname(os.path.abspath(path)), m["image"])
+        if not os.path.exists(pic):
+            raise ValueError(f"{path}: image not found: {m['image']}")
+        return to_column_groups(load_image(pic, bool(m.get("invert", False))))[0]
+    return text_blocks(m.get("text", ""), font)
+
+
 def cmd_upload(a):
     """badgemagic-style config.toml: [[message]] text/mode/speed/blink/border.
-    Rendered like 'text' (thin font by default), so it works over USB and BLE."""
+    Rendered like 'text' (thin font by default), so it works over USB and BLE.
+    A message can hold an image instead of text (see toml_data)."""
     # utf-8-sig: PowerShell writes UTF-8 with a BOM, which tomllib rejects
     with open(a.file, encoding="utf-8-sig") as f:
         cfg = tomllib.loads(f.read())
     msgs = cfg.get("message", [])
     if not 1 <= len(msgs) <= 8:
         sys.exit(f"{a.file}: needs 1 to 8 [[message]] blocks")
-    slots = [make_slot(text_blocks(m.get("text", ""), getattr(a, "font", "thin")),
+    slots = [make_slot(toml_data(m, a.file, getattr(a, "font", "thin")),
                        m.get("mode", "left"),
                        toml_speed(m, a.file), bool(m.get("blink", False)),
                        bool(m.get("border", False))) for m in msgs]

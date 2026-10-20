@@ -188,6 +188,10 @@ border = false
 blink = false
 ```
 
+A message can show a picture instead of text: `image = "pic.png"` (path
+relative to the config file, scaled to 11 rows, dark pixels light up,
+`invert = true` for light ones). Use `mode = "center"` for a still picture.
+
 Up to 8 messages. A `brightness` line from the official CLI's files is
 ignored; use `badgetool.py brightness` instead. A file saved with a UTF-8
 BOM (e.g. by PowerShell) is read correctly.
