@@ -66,14 +66,23 @@ class Badge:
 class HidBadge(Badge):
     """USB HID transport (VID 0416 / PID 5020, interface 0)."""
 
-    def __init__(self, vid=0x0416, pid=0x5020):
+    def __init__(self, vid=0x0416, pid=0x5020, path=None):
         import hid
-        infos = [d for d in hid.enumerate(vid, pid)
-                 if d['interface_number'] == 0]
-        if not infos:
-            raise RuntimeError('badge HID interface not found')
+        if path is None:
+            paths = HidBadge.paths(vid, pid)
+            if not paths:
+                raise RuntimeError('badge HID interface not found')
+            path = paths[0]
         self.d = hid.device()
-        self.d.open_path(infos[0]['path'])
+        self.d.open_path(path)
+
+    @staticmethod
+    def paths(vid=0x0416, pid=0x5020):
+        """HID paths of every connected badge, in a stable (sorted) order.
+        All badges report the same serial, so the path is the only handle."""
+        import hid
+        return sorted(d['path'] for d in hid.enumerate(vid, pid)
+                      if d['interface_number'] == 0)
 
     def close(self):
         self.d.close()
