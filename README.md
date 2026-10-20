@@ -9,7 +9,7 @@
 A single Python tool and a patched firmware for the cheap 44×11 LED name badges
 that ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
 
-- **`badgetool.py`** reads and configures the badges over USB or Bluetooth. You can
+- **`badgetool.py`** reads and configures the badges over USB (HID or serial) or Bluetooth. You can
   set the clock, brightness, Bluetooth name and always-on mode, read the battery
   voltage, upload text and images, stream live pictures and flash firmware.
 - **Patched firmware**, based on
@@ -228,7 +228,8 @@ only) or **Bluetooth** (Web Bluetooth, desktop and Android). It does text
 slots with a live preview of the scroll modes, a 44×11 draw pad that can
 mirror itself live onto the badge, images, the settings, reboot and power
 off. A keep-alive ping notices a lost badge within a few seconds and
-reconnects. A TX/RX monitor shows every packet.
+reconnects. A TX/RX monitor shows every packet. It doesn't have the
+charging-screen setting yet; use `badgetool.py charging-screen` for that.
 
 Both APIs need a secure context: `localhost`, a `file://` page or `https://`.
 It's a single file, so to use it from a phone, put `index.html` on any web
@@ -435,8 +436,9 @@ place than the factory one.
   period), and with many LEDs lit the link dropped. The LED timer period now
   varies by up to 2 % per tick, which you can't see, so the interference is
   spread evenly. The fast-Bluetooth builds also ask for a 4-second supervision
-  timeout instead of 1 second. With nearly every LED lit, streaming now runs
-  at a steady 5 fps instead of 1.5 fps with dropped links.
+  timeout instead of 1 second. With nearly every LED lit, streaming with
+  confirmed writes now runs at a steady 5 fps instead of 1.5 fps with dropped
+  links (without confirmation, as in the file table above: 23 fps).
 - **Bluetooth animation after streaming:** with always-on off, stopping a
   stream always brought up the BT-PAIRING animation, as if every stream had
   started there. It now returns to your slots unless the badge really is in
@@ -480,8 +482,9 @@ place than the factory one.
 - **USB HID replies dropped every other time:** the OUT handler no longer arms
   a zero-length IN, which knocked the data toggle out of step.
 - **Stuck on the charging animation when plugged in:** the screen now leaves
-  after 5 s (adjustable, see Additions) or on a key press. The config is loaded before this screen, so a
-  reboot while charging no longer saves zeros.
+  after 5 s (adjustable, see Additions) or on a key press. The config is
+  loaded before this screen, so a reboot while charging no longer saves
+  zeros.
 - **Bluetooth pairing menu:** leaving it no longer leaves the BLE animation
   fighting with the menu.
 
@@ -570,8 +573,8 @@ renaming a badge keeps it compatible with the app.
 
 ## Ideas / not done yet
 
-- **Status and battery over BLE:** the replies currently go out over USB HID
-  only. Sending them as `f056` notifications would give BLE the full
+- **Status and battery over BLE:** the replies currently go out over USB
+  (HID and serial) only. Sending them as `f056` notifications would give BLE the full
   `status` (voltage, clock, settings) instead of just the battery percentage.
 - **Smoother BLE streaming:** frames arrive on the connection-interval grid
   (Windows picks 30 ms), so streams at 15 or 20 fps jitter by a slot now and
@@ -588,8 +591,9 @@ renaming a badge keeps it compatible with the app.
   hold. Set the clock with `badgetool.py time` when you need it; fixing it
   would mean recalibrating periodically or correcting the RTC in software.
 - **Upstream pull requests:** several fixes (config storage, the HID reply
-  bug, the USB serial port, `LED_T_PB6`, the blips, the charging screen)
-  would be useful for FOSSASIA too.
+  bug, the USB serial port, the `splash` crash over Bluetooth, switching off
+  while charging, `LED_T_PB6`, the blips, the charging screen) would be
+  useful for FOSSASIA too.
 
 ## Credits and licences
 
