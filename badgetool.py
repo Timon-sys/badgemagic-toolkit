@@ -1005,6 +1005,7 @@ def _menu():
         ("full white test screen", lambda: cmd_stream(ns(what="white"))),
         ("stop streaming", lambda: cmd_stream(ns(what="off"))),
         ("reboot", lambda: cmd_reset(ns())),
+        ("power off", lambda: cmd_off(ns())),
         ("flash firmware", lambda: cmd_flash(ns(firmware=ask("build (" + " / ".join(FIRMWARE) + "): ",
                                                             tuple(FIRMWARE))))),
     ]

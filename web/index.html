@@ -1,0 +1,867 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Badge Panel</title>
+<style>
+:root {
+  --bg: #0e0f12; --card: #17191e; --line: #262a31; --text: #e8e9ec; --dim: #8b919c;
+  --accent: #ff4d3d; --accent-dim: #3a1a17; --ok: #3ecf8e; --warn: #f0b429;
+  --led-off: #241614; --led-on: #ff4d3d;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+h1 { font-size: 18px; margin: 0; flex: 1; letter-spacing: .02em; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 10px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+button, select, input[type=text] { font: inherit; color: var(--text); background: #20232a;
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; }
+button { cursor: pointer; }
+button:hover:not(:disabled) { border-color: #3a3f48; background: #262a32; }
+button:disabled { opacity: .4; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.danger { color: var(--accent); }
+button.on { background: var(--accent-dim); border-color: var(--accent); }
+input[type=text] { width: 100%; min-width: 0; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.grow { flex: 1; }
+.pill { font-size: 12px; padding: 3px 9px; border-radius: 99px; background: #20232a; color: var(--dim); }
+.pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.bad { color: #fff; background: var(--accent); }
+#matrix { width: 100%; aspect-ratio: 44 / 11; display: block; background: #120b0a; border-radius: 8px; }
+#pad { width: 100%; aspect-ratio: 44 / 11; display: block; background: #120b0a; border-radius: 8px;
+  touch-action: none; cursor: crosshair; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+.stat { background: #1c1f25; border-radius: 8px; padding: 8px 10px; }
+.stat b { display: block; font-size: 16px; font-weight: 600; }
+.stat span { font-size: 12px; color: var(--dim); }
+.slot { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: center;
+  padding: 8px; border-radius: 8px; border: 1px solid transparent; }
+.slot.sel { border-color: var(--line); background: #1c1f25; }
+.slot .n { color: var(--dim); font-size: 12px; text-align: center; }
+.slot .opts { grid-column: 2 / 4; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  font-size: 13px; color: var(--dim); }
+.slot .opts input[type=range] { width: 90px; }
+label.chk { display: inline-flex; gap: 4px; align-items: center; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.set { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0;
+  border-bottom: 1px solid var(--line); }
+.set:last-child { border-bottom: 0; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 5px 11px; }
+#log { font: 12px/1.5 ui-monospace, Consolas, monospace; color: var(--dim); max-height: 110px;
+  overflow: auto; white-space: pre-wrap; }
+.hint { font-size: 12px; color: var(--dim); }
+.lamp { display: inline-flex; align-items: baseline; gap: 7px; padding: 6px 12px; border-radius: 8px;
+  background: #1c1f25; font-variant-numeric: tabular-nums; }
+.lamp i { width: 10px; height: 10px; border-radius: 50%; background: #333842; align-self: center;
+  transition: background .25s, box-shadow .25s; }
+.lamp b { font: 600 13px ui-monospace, Consolas, monospace; }
+.lamp span { font-weight: 600; min-width: 3ch; }
+.lamp small { color: var(--dim); font-size: 12px; }
+#lampTx.flash i { background: var(--warn); box-shadow: 0 0 10px var(--warn); transition: none; }
+#lampRx.flash i { background: var(--ok); box-shadow: 0 0 10px var(--ok); transition: none; }
+#lampTx b { color: var(--warn); } #lampRx b { color: var(--ok); }
+#trafLog { font: 12px/1.55 ui-monospace, Consolas, monospace; margin-top: 10px; white-space: pre;
+  overflow-x: auto; color: var(--dim); min-height: calc(1.55em * 8); }
+#trafLog .tx { color: var(--warn); } #trafLog .rx { color: var(--ok); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>LED Badge</h1>
+    <span id="conn" class="pill">not connected</span>
+    <button id="btnRe" class="primary" hidden>Reconnect</button>
+    <button id="btnWatch" title="ping the badge every 2 s, notice a lost link and reconnect">keep-alive</button>
+    <button id="btnUsb">USB</button>
+    <button id="btnBle">Bluetooth</button>
+    <button id="btnDisc" disabled>Disconnect</button>
+  </header>
+
+  <section class="card">
+    <div class="row">
+      <span class="lamp" id="lampTx"><i></i><b>TX &gt;</b><span id="txN">0</span><small id="txB">0 B</small></span>
+      <span class="lamp" id="lampRx"><i></i><b>RX &lt;</b><span id="rxN">0</span><small id="rxB">0 B</small></span>
+      <span class="hint grow" id="rate"></span>
+      <button id="btnTrafLog" class="on">log</button>
+      <button id="btnTrafReset">reset</button>
+    </div>
+    <div id="trafLog"></div>
+  </section>
+
+  <section class="card">
+    <canvas id="matrix" width="880" height="220"></canvas>
+    <div class="stats" id="stats" style="margin-top:12px"></div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="margin-bottom:8px">
+      <h2 class="grow" style="margin:0">Messages</h2>
+      <select id="font" title="font"><option value="thin">thin font</option><option value="app">app font</option></select>
+      <button id="btnAdd">+ slot</button>
+      <button id="btnSend" class="primary" disabled>Send to badge</button>
+    </div>
+    <div id="slots"></div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="margin-bottom:8px">
+      <h2 class="grow" style="margin:0">Draw</h2>
+      <button id="btnLive" disabled>Live</button>
+      <button id="btnPadSend" disabled>Send as slot</button>
+    </div>
+    <canvas id="pad" width="880" height="220"></canvas>
+    <div class="row" style="margin-top:8px">
+      <button id="btnClear">Clear</button>
+      <button id="btnInvert">Invert</button>
+      <button id="btnFill">Fill</button>
+      <label class="row" style="gap:6px"><button id="btnImg">Image…</button>
+        <input type="file" id="imgFile" accept="image/*" hidden></label>
+      <span class="hint grow">Drag to draw. Live mirrors the pad on the badge as you draw.</span>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Settings</h2>
+      <div class="set"><span>Brightness</span><span class="seg" id="bright">
+        <button data-v="0">0</button><button data-v="1">1</button><button data-v="2">2</button><button data-v="3">3</button></span></div>
+      <div class="set"><span>Clock</span><button id="btnTime" data-need="custom">Set to this device</button></div>
+      <div class="set"><span>Startup animation</span><span class="seg" id="splash">
+        <button data-v="1">on</button><button data-v="0">off</button></span></div>
+      <div class="set"><span>Bluetooth always-on <span class="hint">(reboots)</span></span><span class="seg" id="bleOn">
+        <button data-v="1">on</button><button data-v="0">off</button></span></div>
+      <div class="set"><input type="text" id="bleName" maxlength="20" placeholder="Bluetooth name">
+        <button id="btnName" data-need="custom">Rename</button></div>
+    </section>
+    <section class="card">
+      <h2>Power</h2>
+      <div class="row">
+        <button id="btnReboot" data-need="custom">Reboot</button>
+        <button id="btnOff" class="danger" data-need="custom">Power off</button>
+      </div>
+      <p class="hint">Power off: the top button switches it back on.</p>
+      <h2 style="margin-top:14px">Log</h2>
+      <div id="log"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+const COLS = 44, ROWS = 11;
+const VID = 0x0416, PID = 0x5020;
+const CMD_POWER = 1, CMD_STREAM_SET = 2, CMD_STREAM_BM = 3, CMD_BLE = 4, CMD_SAVE = 6, CMD_MISC = 8;
+const MISC_SPLASH = 0, MISC_BRIGHTNESS = 1, MISC_TIME = 2, MISC_BATTERY = 3, MISC_STATUS = 4;
+const MODES = ["menu", "slots", "BT download", "clock", "game", "power off"];
+const SLOT_MODES = ["left", "right", "up", "down", "center", "fast", "drop", "curtain", "laser"];
+const APP_FONT = {"0": "007CC6CEDEF6E6C6C67C00", "1": "0018387818181818187E00", "2": "007CC6060C183060C6FE00", "3": "007CC606063C0606C67C00", "4": "000C1C3C6CCCFE0C0C1E00", "5": "00FEC0C0FC060606C67C00", "6": "007CC6C0C0FCC6C6C67C00", "7": "00FEC6060C183030303000", "8": "007CC6C6C67CC6C6C67C00", "9": "007CC6C6C67E0606C67C00", "#": "006C6CFE6C6CFE6C6C0000", "&": "00386C6C3876DCCCCC7600", "_": "00000000000000000000FF", "-": "0000000000FE0000000000", "?": "007CC6C60C181800181800", "@": "00003C429DA5ADB6403C00", "(": "000C183030303030180C00", ")": "0030180C0C0C0C0C183000", "=": "0000007E00007E00000000", "+": "00000018187E1818000000", "!": "00183C3C3C181800181800", "'": "1818081000000000000000", ":": "0000001818000018180000", "%": "006092966C106CD2920C00", "/": "000002060C183060C08000", "\"": "6666222200000000000000", "[": "003C303030303030303C00", "]": "003C0C0C0C0C0C0C0C3C00", " ": "0000000000000000000000", "*": "000000663CFF3C66000000", ",": "0000000000000030301020", ".": "0000000000000000303000", "$": "107CD6D6701CD6D67C1010", "~": "0076DC0000000000000000", "{": "000E181818701818180E00", "}": "00701818180E1818187000", "<": "00060C18306030180C0600", ">": "006030180C060C18306000", "^": "386CC60000000000000000", "`": "1818100800000000000000", ";": "0000001818000018180810", "\\": "0080C06030180C06020000", "|": "0018181818001818181800", "a": "00000000780C7CCCCC7600", "b": "00E060607C666666667C00", "c": "000000007CC6C0C0C67C00", "d": "001C0C0C7CCCCCCCCC7600", "e": "000000007CC6FEC0C67C00", "f": "001C363078303030307800", "g": "00000076CCCCCC7C0CCC78", "h": "00E060606C76666666E600", "i": "0018180038181818183C00", "j": "0C0C001C0C0C0C0CCCCC78", "k": "00E06060666C78786CE600", "l": "0038181818181818183C00", "m": "00000000ECFED6D6D6C600", "n": "00000000DC666666666600", "o": "000000007CC6C6C6C67C00", "p": "000000DC6666667C6060F0", "q": "0000007CCCCCCC7C0C0C1E", "r": "00000000DE76606060F000", "s": "000000007CC6701CC67C00", "t": "00103030FC303030341800", "u": "00000000CCCCCCCCCC7600", "v": "00000000C6C6C66C381000", "w": "00000000C6D6D6D6FE6C00", "x": "00000000C66C38386CC600", "y": "000000C6C6C6C67E060CF8", "z": "00000000FE8C183062FE00", "A": "00386CC6C6FEC6C6C6C600", "B": "00FC6666667C666666FC00", "C": "007CC6C6C0C0C0C6C67C00", "D": "00FC66666666666666FC00", "E": "00FE66626878686266FE00", "F": "00FE66626878686060F000", "G": "007CC6C6C0C0CEC6C67E00", "H": "00C6C6C6C6FEC6C6C6C600", "I": "003C181818181818183C00", "J": "001E0C0C0C0C0CCCCC7800", "K": "00E6666C6C786C6C66E600", "L": "00F060606060606266FE00", "M": "0082C6EEFED6C6C6C6C600", "N": "0086C6E6F6DECEC6C6C600", "O": "007CC6C6C6C6C6C6C67C00", "P": "00FC6666667C606060F000", "Q": "007CC6C6C6C6C6D6DE7C06", "R": "00FC6666667C6C6666E600", "S": "007CC6C660380CC6C67C00", "T": "007E7E5A18181818183C00", "U": "00C6C6C6C6C6C6C6C67C00", "V": "00C6C6C6C6C6C66C381000", "W": "00C6C6C6C6D6FEEEC68200", "X": "00C6C66C7C387C6CC6C600", "Y": "00666666663C1818183C00", "Z": "00FEC6860C183062C6FE00", "Á": "0810386CC6C6FEC6C6C600", "À": "2010386CC6C6FEC6C6C600", "Â": "1028386CC6C6FEC6C6C600", "Ä": "2800386CC6C6FEC6C6C600", "Å": "1028107CC6C6FEC6C6C600", "É": "0810FE626878686266FE00", "È": "2010FE626878686266FE00", "Ê": "1028FE626878686266FE00", "Ë": "2800FE626878686266FE00", "Ě": "2810FE626878686266FE00", "Í": "04083C1818181818183C00", "Ì": "10083C1818181818183C00", "Î": "08143C1818181818183C00", "Ï": "14003C1818181818183C00", "Ó": "08107CC6C6C6C6C6C67C00", "Ò": "20107CC6C6C6C6C6C67C00", "Ô": "10287CC6C6C6C6C6C67C00", "Ö": "28007CC6C6C6C6C6C67C00", "Ő": "14287CC6C6C6C6C6C67C00", "Ú": "0810C6C6C6C6C6C6C67C00", "Ù": "2010C6C6C6C6C6C6C67C00", "Û": "1028C6C6C6C6C6C6C67C00", "Ü": "2800C6C6C6C6C6C6C67C00", "Ű": "1428C6C6C6C6C6C6C67C00", "Ů": "102810C6C6C6C6C6C67C00", "Ý": "04086666663C1818183C00", "Ÿ": "14006666663C1818183C00", "á": "00000810780C7CCCCC7600", "à": "00002010780C7CCCCC7600", "â": "00102800780C7CCCCC7600", "ä": "00002800780C7CCCCC7600", "å": "00102810780C7CCCCC7600", "é": "000008107CC6FEC0C67C00", "è": "000020107CC6FEC0C67C00", "ê": "001028007CC6FEC0C67C00", "ë": "000028007CC6FEC0C67C00", "ě": "000028107CC6FEC0C67C00", "í": "0000081038181818183C00", "ì": "0000201038181818183C00", "î": "0008140038181818183C00", "ï": "0000140038181818183C00", "ó": "000008107CC6C6C6C67C00", "ò": "000020107CC6C6C6C67C00", "ô": "001028007CC6C6C6C67C00", "ö": "000028007CC6C6C6C67C00", "ő": "000014287CC6C6C6C67C00", "ú": "00000810CCCCCCCCCC7600", "ù": "00002010CCCCCCCCCC7600", "û": "00102800CCCCCCCCCC7600", "ü": "00002800CCCCCCCCCC7600", "ű": "00001428CCCCCCCCCC7600", "ů": "00102810CCCCCCCCCC7600", "ý": "000810C6C6C6C67E060CF8", "ÿ": "002800C6C6C6C67E060CF8", "Ç": "007CC6C6C0C0C0C67C1030", "ç": "000000007CC6C0467C1030", "Ñ": "342CC6E6F6DECEC6C6C600", "ñ": "00342C00DC666666666600", "Č": "28107CC6C6C0C0C6C67C00", "č": "000028107CC6C0C0C67C00", "Ď": "2810FC666666666666FC00", "ď": "02061C0C7CCCCCCCCC7600", "Ň": "2810C6E6F6DECEC6C6C600", "ň": "00002810DC666666666600", "Ř": "2810FC66667C6C6666E600", "ř": "00002810DE76606060F000", "Š": "28107CC6E0380CC6C67C00", "š": "000028107CC6701CC67C00", "Ť": "14087E7E5A181818183C00", "ť": "00143430FC303030341800", "Ž": "2810FE860C183062C6FE00"};
+const LUCAS = hex("a40003020404020405090b00ff07ff0700013a026806a62005002205210771a2c4100522073332456209230e75a24d294906a53228a52401240c75a25536888338681100250a77227692a5dd9218260d76e28d16b56951a2454b00270631b2c400280873225552aa15290973224556aa94002a0d57264e568986214ab20a002b0a55a655180d5218012c0732de4ca2002d0616eec5012e0621a284002f08772276da6700300a75a2cd92794b1600310975a25526761a04320a75a2cd928559db20330c75a2c59086c910868302340c75a25d2625a564d0c204350a75a2c5750db56401360c75a2cd9289439269c902370a75a2c52066c52600380c75a2cd9269c99269c902390c75a2cd9269c9106ac9023a0641a644143b0862de4c9a28003c0874625dd4d8003d0835aac5a00e023e08746245d8d4063f0b75a2cd9285591d8a00400f7722cea0a492a25494611f1400410b75a2cd9269c390d902420d75a2c59064daa064daa000430975a2cd20761d02440a75a2c59064de0605450b75a2c5311c92301c04460a75a2c5311c92b008470c75a2cd9289c99069c902480a75a245661b86cc16490671a2c4214a0975a265472d59004b0d75a2452625252d892a59004c0875a245d8e3204d0c772246ba2d152952ad014e0c76e245b829919468a3184f0a75a2cd92794b1600500c75a2c59064daa0844500510b75a2cd92b92452a404520d75a2c59064daa0942a5900530b75a2cd92a9ab962c00540975a2c520853d01550975a245e65bb200560a75a245e62da94500570b772246ea1429956d0d580b75a245a625b54a4d0b590a75a245664b6a61095a0a75a2c520661d07015b087322c510751a5c07772246de075d087322c5d469085f061722c621610a55a2cd9a0c5a3204620c65a245180e49a60d0a0063085462cd901507640a65a26565d0b46408650a55a2cd920d4a3a04660a646295120d495602670c659ecd9269c910260b00680a65a245180e49660b690761a24432046a09731e551a9516006b0a646245561a92a6006c0762e284d2036d0c5722c6258aa4488aa4026e0955a2c590646e016f0955a2cd92d99205700c659ec59064daa0842100710a659ecda069c91016720955a2c590646211730955a2cda01e1400740a65a2553448613501750955a245e6960c01760a55a245664b6a1100770c57224614499114499561780a55a24596d42ab500790b659e45664b863059007a0955a2c5a0b50d027b0a746295924561160a7c0671a2c4217d0b7462859885519648007e0726ee8d6401a10771a2443404a20d75a255b6549428a96c1100a30c75a2d512664314668300a50c75a245a625b56890c208a60671a2c432a912885ed6908549640995509292301b2200ab0c56e655254aa22ccaa200ac0735a6c52016ad0615aec520b10b75a255180d52980f02b60f76e2cd70199464c9922cc99200b70611ae4400bb0d56e6459445599444491401bf0b75a2550e65c52c5900c00da5a24d9a234ba60d43660bc10da5a25d1d59326d18325b00c20da5a25596e44ba60d43660bc30da5a28d295f326d18325b00c40c95a24d7dc9b461c86c01c50ea5a2559664d99269c390d902c61079a2ce410bb37018942cccc26c10c80da5a24d9a0f633824613808c90ca5a25d7d18c32109c341ca0ea5a25596c4c3180e49180e02cb0c95a24d7918c32109c341cc08a2e24494257dcd08a2238d96f405ce09a3224d63d41700cf0993224512467d01d00f76e2cd1065493628b5244b8604d10ea6e28d640f372592126d1403d20ca5a24d9a234be62d5900d30ba5a25d1d59326fc902d40ca5a25596e44be62d5900d50ba5a28d295f326fc902d60b85a245962c99b76401d70a55a64596d42ab500d90ba5a24d9a67be250b00da0aa5a25d3df32d5900db0ba5a25596c4996fc902dc0a85a2459666de9205dd0ba5a25d3db325b5b004df0b845e8d12594a961a00e00c85a24d9a236b3268c910e10c85a25d1d5993414b8600e20c85a25596e46b3268c910e30c85a28d295f93414b8600e40b75a24d7d4d062d1902e50e95a255966439b22683960c01e60d59a2ce354b8621c9d26508e80c85a24d9a234b3628e910e90c85a25d1d59b241498700ea0c85a25596e44b3628e910eb0b75a24d7dc906251d02ec0872e24494250ded0872e28c96b400ee0873224d63d402ef0963224512462d00f10a85a28d291e92cc2df20c85a24d9a234b664b1600f30b85a25d1d59325bb200f40c85a25596e44b664b1600f50b85a28d295f325bb200f60a75a24d7dc96cc902f70955a6553ee81100f90a85a24d9a676ec910fa0a85a25d3d734b8600fb0b85a25596c4995b3204fc0a75a24d39734b8600fd0c959e5d3db32543982c00ff0c859e4d39b32543982c0000000004ffff00");
+const TEXT_SUBST = { "ß": "ss", "„": '"', "“": '"', "”": '"', "’": "'", "–": "-" };
+
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// a GATT write or HID report to a badge that's gone can hang for ~30 s; give up much sooner
+function withTimeout(p, ms, what) {
+  let t;
+  const to = new Promise((_, rej) => t = setTimeout(() => {
+    const e = new Error(what + " timed out"); e.name = "TimeoutError"; rej(e);
+  }, ms));
+  return Promise.race([p, to]).finally(() => clearTimeout(t));
+}
+function hex(s) { const a = new Uint8Array(s.length / 2); for (let i = 0; i < a.length; i++) a[i] = parseInt(s.substr(i * 2, 2), 16); return a; }
+function log(msg) { const l = $("log"); l.textContent = new Date().toLocaleTimeString() + "  " + msg + "\n" + l.textContent; }
+
+// ---------------------------------------------------------------- fonts (ports of badgetool.py)
+
+function u8g2(d) {
+  const [b0, b1, bw, bh, bx, by, bd] = d.slice(2, 9);
+  const at = {};
+  for (let p = 23; p < d.length && d[p + 1]; p += d[p + 1]) at[d[p]] = p + 2;
+  function glyph(code) {
+    if (!(code in at)) return null;
+    let pos = at[code], bit = 0;
+    const get = n => { let v = 0; for (let i = 0; i < n; i++) { v |= ((d[pos] >> bit) & 1) << i; if (++bit === 8) { bit = 0; pos++; } } return v; };
+    const sg = n => get(n) - (1 << (n - 1));
+    const w = get(bw), h = get(bh), x = sg(bx), y = sg(by), dx = sg(bd);
+    const px = [];
+    while (px.length < w * h) {
+      const a = get(b0), b = get(b1);
+      for (;;) { for (let i = 0; i < a; i++) px.push(0); for (let i = 0; i < b; i++) px.push(1); if (get(1) === 0) break; }
+    }
+    return { w, h, x, y, dx, px };
+  }
+  return function render(text, baseline = 8) {
+    let pen = 0, maxX = 0;
+    const on = new Set();
+    for (const ch of text) {
+      const g = glyph(ch.codePointAt(0)) || glyph(63);
+      const top = baseline + 1 - (g.h + g.y);
+      for (let r = 0; r < g.h; r++) for (let c = 0; c < g.w; c++)
+        if (g.px[r * g.w + c]) { const x = pen + g.x + c; if (x >= 0) { on.add(x + "," + (top + r)); maxX = Math.max(maxX, x + 1); } }
+      pen += g.dx;
+    }
+    const w = Math.max(pen, maxX);
+    return Array.from({ length: ROWS }, (_, y) => Array.from({ length: w }, (_, x) => on.has(x + "," + y)));
+  };
+}
+const renderThin = u8g2(LUCAS);
+
+// rows of bools -> 11 bytes per 8-px group, MSB left
+function toBlocks(img, center) {
+  let w = img[0].length;
+  if (w === 0) { img = img.map(() => [false]); w = 1; }
+  if (center && w < COLS) {
+    const pad = (COLS - w) >> 1;
+    img = img.map(r => [...Array(pad).fill(false), ...r, ...Array(COLS - w - pad).fill(false)]);
+    w = COLS;
+  }
+  const groups = Math.ceil(w / 8), out = new Uint8Array(groups * ROWS);
+  for (let g = 0; g < groups; g++) for (let r = 0; r < ROWS; r++) {
+    let b = 0;
+    for (let bit = 0; bit < 8; bit++) { const x = g * 8 + bit; if (x < w && img[r][x]) b |= 0x80 >> bit; }
+    out[g * ROWS + r] = b;
+  }
+  return out;
+}
+
+function textBlocks(text, font) {
+  if (font === "thin") return toBlocks(renderThin(text), false);
+  for (const [k, v] of Object.entries(TEXT_SUBST)) text = text.split(k).join(v);
+  const chars = [...text];
+  const out = new Uint8Array(chars.length * ROWS);
+  chars.forEach((ch, i) => out.set(hex(APP_FONT[ch] || APP_FONT["?"]), i * ROWS));
+  return out;
+}
+
+function blocksToRows(data) {
+  const w = (data.length / ROWS) * 8;
+  return Array.from({ length: ROWS }, (_, r) =>
+    Array.from({ length: w }, (_, x) => !!(data[(x >> 3) * ROWS + r] & (0x80 >> (x & 7)))));
+}
+
+// the 'wang' upload of the Badge Magic app
+function legacyPacket(slots, yearByte) {
+  const hdr = new Uint8Array(64);
+  hdr.set([0x77, 0x61, 0x6e, 0x67]);
+  slots.forEach((s, i) => {
+    if (s.blink) hdr[6] |= 1 << i;
+    if (s.border) hdr[7] |= 1 << i;
+    hdr[8 + i] = (s.speed << 4) | s.mode;
+    const n = s.data.length / ROWS;
+    hdr[16 + 2 * i] = n >> 8; hdr[17 + 2 * i] = n & 0xff;
+  });
+  const t = new Date();
+  hdr.set([yearByte, t.getMonth() + 1, t.getDate(), t.getHours(), t.getMinutes(), t.getSeconds()], 38);
+  const total = slots.reduce((a, s) => a + s.data.length, 64);
+  const pkt = new Uint8Array(total);
+  pkt.set(hdr);
+  let o = 64;
+  for (const s of slots) { pkt.set(s.data, o); o += s.data.length; }
+  return pkt;
+}
+
+function timePayload() {
+  const t = new Date(), y = t.getFullYear();
+  return [CMD_MISC, MISC_TIME, y & 0xff, y >> 8, t.getMonth() + 1, t.getDate(), t.getHours(), t.getMinutes(), t.getSeconds()];
+}
+
+// ---------------------------------------------------------------- traffic monitor
+
+const NG_NAMES = { 1: p => ["power off", "power ?", "reboot"][p[1]] || "power", 2: p => p[1] ? "live off" : "live on",
+  3: () => "live frame", 4: p => p[1] ? "ble name" : "ble always-on", 6: () => "save",
+  8: p => ["splash", "brightness", "set time", "battery?", "status?"][p[1]] || "misc" };
+const ngName = p => (NG_NAMES[p[0]] || (() => "cmd " + p[0]))(p);
+
+const traffic = {
+  tx: { n: 0, b: 0, lastN: 0 }, rx: { n: 0, b: 0, lastN: 0 }, lines: [], dirty: false, showLog: true,
+  add(dir, bytes, label) {
+    const c = this[dir];
+    c.n++; c.b += bytes.length;
+    const lamp = $(dir === "tx" ? "lampTx" : "lampRx");
+    lamp.classList.add("flash");
+    clearTimeout(c.timer); c.timer = setTimeout(() => lamp.classList.remove("flash"), 90);
+    const t = new Date(), ts = t.toTimeString().slice(0, 8) + "." + String(t.getMilliseconds()).padStart(3, "0");
+    const hx = [...bytes.subarray(0, 18)].map(b => b.toString(16).padStart(2, "0")).join(" ") + (bytes.length > 18 ? " …" : "");
+    this.lines.unshift(`<span class="${dir}">${ts}  ${dir === "tx" ? "TX >" : "RX <"}  ${label.padEnd(14)} ${String(bytes.length).padStart(3)} B</span>  ${hx}`);
+    this.lines.length = Math.min(this.lines.length, 8);
+    if (!this.dirty) { this.dirty = true; requestAnimationFrame(() => this.render()); }
+  },
+  render() {
+    this.dirty = false;
+    const kb = b => b < 1024 ? b + " B" : (b / 1024).toFixed(1) + " kB";
+    $("txN").textContent = this.tx.n; $("txB").textContent = kb(this.tx.b);
+    $("rxN").textContent = this.rx.n; $("rxB").textContent = kb(this.rx.b);
+    $("trafLog").innerHTML = this.showLog ? this.lines.join("\n") : "";
+    $("trafLog").hidden = !this.showLog;
+  },
+  reset() { for (const d of ["tx", "rx"]) Object.assign(this[d], { n: 0, b: 0, lastN: 0 }); this.lines = []; this.render(); $("rate").textContent = ""; },
+};
+const tx = (bytes, label) => traffic.add("tx", Uint8Array.from(bytes), label);
+const rx = (bytes, label) => traffic.add("rx", Uint8Array.from(bytes), label);
+
+setInterval(() => {
+  const r = d => { const c = traffic[d], v = c.n - c.lastN; c.lastN = c.n; return v; };
+  const t = r("tx"), x = r("rx");
+  $("rate").textContent = t || x ? `${t} out · ${x} in per second` : "";
+}, 1000);
+
+// ---------------------------------------------------------------- links
+
+class HidLink {
+  constructor(dev) { this.dev = dev; this.kind = "usb"; this.waiter = null; this.onReport = this.onReport.bind(this); }
+  async open() {
+    if (!this.dev.opened) await this.dev.open();
+    this.dev.addEventListener("inputreport", this.onReport);
+  }
+  async close() { this.dev.removeEventListener("inputreport", this.onReport); try { await this.dev.close(); } catch {} }
+  get name() { return this.dev.productName || "USB badge"; }
+  async writeReports(data, label) {
+    const n = Math.ceil(data.length / 64);
+    for (let i = 0; i < data.length; i += 64) {
+      const c = new Uint8Array(64); c.set(data.subarray(i, i + 64));
+      await withTimeout(this.dev.sendReport(0, c), 2000, "USB write");
+      tx(c, n > 1 ? `${label} ${i / 64 + 1}/${n}` : label);
+    }
+  }
+  async ng(payload) {
+    const p = Uint8Array.from(payload), f = new Uint8Array(4 + p.length);
+    f.set([0x4e, 0x47, p.length & 0xff, p.length >> 8]); f.set(p, 4);
+    await this.writeReports(f, ngName(p));
+  }
+  onReport(e) {
+    const d = new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength);
+    const magic = String.fromCharCode(d[0], d[1], d[2]);
+    rx(d, { STA: "status", BAT: "battery" }[magic] || "report");
+    const w = this.waiter;
+    if (w && String.fromCharCode(d[0], d[1], d[2]) === w.magic) { this.waiter = null; w.done(d); }
+  }
+  query(payload, magic) {
+    return new Promise((res, rej) => {
+      const t = setTimeout(() => {
+        this.waiter = null;
+        const e = new Error("no reply (needs the patched firmware)"); e.name = "TimeoutError"; rej(e);
+      }, 1000);
+      this.waiter = { magic, done: d => { clearTimeout(t); res(d); } };
+      this.ng(payload).catch(e => { clearTimeout(t); this.waiter = null; rej(e); });
+    });
+  }
+  async status() {
+    const r = await this.query([CMD_MISC, MISC_STATUS], "STA");
+    const v = new DataView(r.buffer, r.byteOffset, r.byteLength);
+    const str = (a, b) => new TextDecoder().decode(r.subarray(a, b)).split("\0")[0];
+    const y = v.getUint16(30, true), p2 = n => String(n).padStart(2, "0");
+    return {
+      firmware: str(44, 64), bleAlwaysOn: !!r[4], brightness: r[5], splashMs: v.getUint16(6, true),
+      bleName: str(10, 30), time: `${y}-${p2(r[32])}-${p2(r[33])} ${p2(r[34])}:${p2(r[35])}:${p2(r[36])}`,
+      mv: v.getUint16(39, true), charging: !!r[41], mode: MODES[r[42]] ?? String(r[42]), streaming: !!(r[43] & 1),
+    };
+  }
+  async upload(pkt) {
+    const p = new Uint8Array(Math.ceil(pkt.length / 64) * 64); p.set(pkt);
+    await this.writeReports(p, "upload");
+  }
+  yearByte() { return new Date().getFullYear() % 100; }
+}
+
+const U = n => BluetoothUUID.canonicalUUID(n);
+const dvBytes = v => new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+class BleLink {
+  constructor(dev) { this.dev = dev; this.kind = "ble"; }
+  get name() { return this.dev.name || "BLE badge"; }
+  // connect + service discovery under one deadline: right after a reboot Windows can
+  // stall in getPrimaryService forever, not just in connect()
+  async open() {
+    try { await withTimeout(this._open(), 12000, "Bluetooth connect"); }
+    catch (e) { try { this.dev.gatt.disconnect(); } catch {} throw e; }
+    this._listen().catch(() => {});  // nice to have; never let it block or fail the connect
+  }
+  // f056 notifies the 1-byte ng status after each command: shows up as RX in the monitor
+  async _listen() {
+    if (!this.ngc) return;
+    const n = await this.ngc.service.getCharacteristic(U(0xf056));
+    n.addEventListener("characteristicvaluechanged", e =>
+      rx(dvBytes(e.target.value), "ng ack"));
+    await withTimeout(n.startNotifications(), 5000, "notify");
+  }
+  async _open() {
+    const g = await this.dev.gatt.connect();
+    this.legacy = await (await g.getPrimaryService(U(0xfee0))).getCharacteristic(U(0xfee1));
+    try { this.ngc = await (await g.getPrimaryService(U(0xf055))).getCharacteristic(U(0xf057)); } catch { this.ngc = null; }
+    try { this.batt = await (await g.getPrimaryService(U(0x180f))).getCharacteristic(U(0x2a19)); } catch { this.batt = null; }
+    try {
+      const fw = await (await g.getPrimaryService(U(0x180a))).getCharacteristic(U(0x2a26));
+      this.fw = new TextDecoder().decode(await fw.readValue()).split("\0")[0];
+    } catch { this.fw = "?"; }
+  }
+  async close() { try { this.dev.gatt.disconnect(); } catch {} }
+  async ng(payload) {
+    if (!this.ngc) throw new Error("this badge has no ng service (factory firmware?)");
+    const p = Uint8Array.from(payload);
+    await withTimeout(this.ngc.writeValueWithResponse(p), 3000, "Bluetooth write");
+    tx(p, ngName(p));
+  }
+  async status() {
+    const s = { firmware: this.fw };
+    if (this.batt) {
+      tx([], "read battery");
+      const v = await withTimeout(this.batt.readValue(), 2000, "Bluetooth read");
+      rx(dvBytes(v), "battery");
+      s.pct = v.getUint8(0);
+    }
+    return s;
+  }
+  async upload(pkt) {
+    const p = new Uint8Array(Math.ceil(pkt.length / 16) * 16); p.set(pkt);
+    for (let i = 0, n = p.length / 16; i < p.length; i += 16) {
+      await withTimeout(this.legacy.writeValueWithResponse(p.subarray(i, i + 16)), 3000, "Bluetooth write");
+      tx(p.subarray(i, i + 16), `upload ${i / 16 + 1}/${n}`);
+    }
+    // the firmware takes its clock from the header only when the transfer ends, so correct it
+    if (this.ngc) await this.ng(timePayload());
+  }
+  yearByte() { return new Date().getFullYear() & 0xff; }
+}
+
+// ---------------------------------------------------------------- state
+
+let link = null, custom = false, status = {}, busy = Promise.resolve();
+let rebootPending = false;
+let lastDev = null;            // {kind, dev} of the badge to reconnect to
+let isLost = false, reconnecting = false, attaching = false, inFlight = 0, misses = 0;
+
+// errors that mean the badge is gone, not that it disliked a command
+const linkError = e => ["TimeoutError", "NetworkError", "InvalidStateError", "NotFoundError"].includes(e.name);
+
+// one badge operation at a time: HID replies and GATT writes must not interleave
+function run(label, fn) {
+  const p = busy.then(async () => {
+    if (!link) throw new Error("not connected");
+    inFlight++;
+    try { return await fn(link); } finally { inFlight--; }
+  });
+  busy = p.catch(() => {});
+  p.catch(e => {
+    if (label) log(label + ": " + e.message);
+    if (label && linkError(e)) lost(e.message);
+  });
+  return p;
+}
+
+async function attach(l) {
+  if (attaching) return;
+  attaching = true; refreshUi();
+  try {
+    if (link) { const old = link; link = null; await old.close(); }
+    await l.open();
+    link = l; isLost = false; misses = 0;
+    lastDev = { kind: l.kind, dev: l.dev };
+    try { status = await l.status(); custom = l.kind === "ble" ? !!l.ngc : true; }
+    catch { status = {}; custom = false; }
+    log(`connected: ${l.name} over ${l.kind === "usb" ? "USB" : "Bluetooth"}${custom ? "" : " (text/image only)"}`);
+    if (l.kind === "ble")
+      l.dev.addEventListener("gattserverdisconnected", () => { if (link === l) lost("Bluetooth link dropped"); }, { once: true });
+  } finally { attaching = false; refreshUi(); }
+}
+
+async function lost(reason) {
+  if (!link || rebootPending) return;
+  const l = link;
+  link = null; custom = false; status = {}; isLost = true; stopLive();
+  log("badge lost: " + reason);
+  refreshUi();
+  try { await l.close(); } catch {}
+  if (watch) autoReconnect();
+}
+
+async function reconnect() {
+  if (!lastDev || link) return;
+  if (lastDev.kind === "usb") {
+    const ds = await navigator.hid.getDevices();
+    const d = ds.find(d => d === lastDev.dev)
+      || ds.find(d => d.vendorId === VID && d.productId === PID && d.collections.some(c => c.usagePage === 0xff00));
+    if (!d) throw new Error("not on USB");
+    await attach(new HidLink(d));
+  } else {
+    await attach(new BleLink(lastDev.dev));
+  }
+  if (!link) throw new Error("no luck");
+}
+
+// keep trying for ~2 minutes; the button retries any time. -> true once connected
+async function autoReconnect(force) {
+  if (reconnecting) return false;
+  reconnecting = true; refreshUi();
+  try {
+    for (let i = 0; i < 24 && !link && (watch || force) && lastDev; i++) {
+      try { await reconnect(); } catch { await sleep(5000); }
+    }
+  } finally { reconnecting = false; refreshUi(); }
+  if (!link && isLost) log("still gone; switch it on / back in range and hit Reconnect");
+  return !!link;
+}
+
+async function detach() {
+  stopLive();
+  lastDev = null; isLost = false;
+  if (link) { const l = link; link = null; await l.close(); }
+  custom = false; status = {}; refreshUi();
+}
+
+async function connectUsb() {
+  if (!navigator.hid) return log("WebHID isn't available here: use desktop Chrome or Edge");
+  const devs = await navigator.hid.requestDevice({ filters: [{ vendorId: VID, productId: PID }] });
+  const d = devs.find(d => d.collections.some(c => c.usagePage === 0xff00)) || devs[0];
+  if (d) await attach(new HidLink(d)).catch(e => log("USB: " + e.message));
+}
+
+async function connectBle() {
+  if (!navigator.bluetooth) return log("Web Bluetooth isn't available here: use Chrome or Edge (https or localhost)");
+  const dev = await navigator.bluetooth.requestDevice({
+    filters: [{ services: [0xf055] }, { services: [0xfee0] }, { name: "LED Badge Magic" }, { namePrefix: "LSLED" }],
+    optionalServices: [0xf055, 0xfee0, 0x180f, 0x180a],
+  });
+  log("connecting to " + (dev.name || dev.id) + " …");
+  await attach(new BleLink(dev)).catch(e => log("Bluetooth: " + e.message));
+}
+
+// after a reboot: USB re-enumerates (~15 s), BLE needs a fresh GATT connect.
+// Only the reset goes through the command queue; the waiting happens outside it.
+async function rebootAndRestore(l) {
+  rebootPending = true;
+  try { await l.ng([CMD_POWER, 2]); } catch {}  // the link may drop before the ack
+  log("badge rebooting …");
+  stopLive();
+  link = null; refreshUi();
+  if (l.kind === "ble") bleComeBack(l);
+  else await l.close();  // the 'connect' handler below re-attaches and restores the clock
+}
+
+async function bleComeBack(l) {
+  await l.close();
+  await sleep(6000);
+  rebootPending = false; isLost = true;
+  if (await autoReconnect(true)) {
+    await run("time", k => k.ng(timePayload())).catch(() => {});
+    log("back up, clock restored");
+  }
+}
+
+if (navigator.hid) {
+  navigator.hid.addEventListener("connect", async e => {
+    const d = e.device;
+    if (link || d.vendorId !== VID || d.productId !== PID) return;
+    if (lastDev && lastDev.kind === "ble") return;  // don't hijack a Bluetooth session
+    await sleep(1000);
+    if (link) return;
+    await attach(new HidLink(d)).catch(err => log("USB: " + err.message));
+    if (rebootPending && custom) {
+      await run("time", l => l.ng(timePayload())).catch(() => {});
+      log("back up, clock restored");
+    }
+    rebootPending = false;
+  });
+  navigator.hid.addEventListener("disconnect", e => {
+    if (link && link.kind === "usb" && link.dev === e.device) lost("USB badge unplugged");
+  });
+  // reconnect silently to a badge this page was allowed to use before
+  navigator.hid.getDevices().then(ds => {
+    const d = ds.find(d => d.vendorId === VID && d.productId === PID && d.collections.some(c => c.usagePage === 0xff00));
+    if (d && !link) attach(new HidLink(d)).catch(() => {});
+  });
+}
+
+// keep-alive: ping every 2 s (status over USB, battery read over Bluetooth); two misses = lost.
+// Off: refresh the status every 6 s without judging. Skipped while anything else is talking.
+let watch = true, tickN = 0;
+setInterval(() => {
+  tickN++;
+  if (!link || rebootPending || inFlight || live) return;
+  if (link.kind === "usb" && !custom) return;  // factory firmware never answers
+  if (!watch && tickN % 3) return;
+  run(null, async l => { status = await l.status(); misses = 0; refreshUi(); }).catch(e => {
+    if (!watch || !linkError(e)) return;
+    if (++misses >= 2) lost("no answer to keep-alive ping");
+  });
+}, 2000);
+
+// ---------------------------------------------------------------- UI: status + settings
+
+function stat(label, value) { return `<div class="stat"><b>${value}</b><span>${label}</span></div>`; }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
+
+function batteryPct(mv) { return Math.max(0, Math.min(100, Math.round((mv - 3300) / 9))); }
+
+function refreshUi() {
+  const c = $("conn");
+  if (link) { c.textContent = `${link.name} · ${link.kind === "usb" ? "USB" : "BT"}`; c.className = "pill ok"; }
+  else if (rebootPending) { c.textContent = "rebooting…"; c.className = "pill warn"; }
+  else if (reconnecting || attaching) { c.textContent = "reconnecting…"; c.className = "pill warn"; }
+  else if (isLost) { c.textContent = "badge lost"; c.className = "pill bad"; }
+  else { c.textContent = "not connected"; c.className = "pill"; }
+  $("btnRe").hidden = !!link || !lastDev || rebootPending;
+  $("btnRe").disabled = reconnecting || attaching;
+  $("btnWatch").classList.toggle("on", watch);
+  $("btnDisc").disabled = !link;
+  $("btnSend").disabled = !link;
+  $("btnPadSend").disabled = !link;
+  $("btnLive").disabled = !link || !custom;
+  document.querySelectorAll("[data-need=custom], #bright button, #splash button, #bleOn button")
+    .forEach(b => b.disabled = !link || !custom);
+
+  const s = status, st = [];
+  if (link) {
+    if (s.mv != null) st.push(stat(s.charging ? "battery · charging" : "battery", `${batteryPct(s.mv)} % <small>${(s.mv / 1000).toFixed(2)} V</small>`));
+    else if (s.pct != null) st.push(stat("battery", s.pct + " %"));
+    if (s.time) st.push(stat("badge clock", s.time.slice(11)));
+    if (s.mode) st.push(stat("showing", s.streaming ? "live picture" : s.mode));
+    if (s.bleName) st.push(stat("Bluetooth name", esc(s.bleName)));
+    if (s.firmware) st.push(stat("firmware", esc(s.firmware)));
+    if (link.kind === "ble" && custom) st.push(stat("more", '<small>clock & settings show over USB</small>'));
+  }
+  $("stats").innerHTML = st.join("");
+  setSeg("bright", s.brightness);
+  setSeg("splash", s.splashMs == null ? null : s.splashMs ? 1 : 0);
+  setSeg("bleOn", s.bleAlwaysOn == null ? null : s.bleAlwaysOn ? 1 : 0);
+  if (s.bleName && document.activeElement !== $("bleName")) $("bleName").value = s.bleName;
+}
+
+function setSeg(id, v) { $(id).querySelectorAll("button").forEach(b => b.classList.toggle("on", v != null && +b.dataset.v === +v)); }
+
+async function saveSetting(label, payload, reboot) {
+  await run(label, async l => {
+    await l.ng(payload); await sleep(200);
+    await l.ng([CMD_SAVE]); await sleep(1000);
+    log(label + " saved");
+    if (reboot) await rebootAndRestore(l);
+    else { try { status = await l.status(); } catch {} refreshUi(); }
+  }).catch(() => {});  // run() already logged it
+}
+
+$("bright").onclick = e => { const v = e.target.dataset.v; if (v != null) { status.brightness = +v; refreshUi(); saveSetting("brightness " + v, [CMD_MISC, MISC_BRIGHTNESS, +v]); } };
+$("splash").onclick = e => { const v = e.target.dataset.v; if (v != null) saveSetting("startup animation", [CMD_MISC, MISC_SPLASH, +v ? 50 : 0, 0]); };
+$("bleOn").onclick = e => { const v = e.target.dataset.v; if (v != null) saveSetting("Bluetooth always-on " + (+v ? "on" : "off"), [CMD_BLE, 0, +v], true); };
+$("btnName").onclick = () => {
+  const n = $("bleName").value.trim();
+  if (!n || !/^[\x20-\x7e]{1,20}$/.test(n)) return log("name: 1-20 plain ASCII characters");
+  saveSetting(`name "${n}"`, [CMD_BLE, 1, ...[...n].map(c => c.charCodeAt(0))], true);
+};
+$("btnTime").onclick = () => run("time", async l => { await l.ng(timePayload()); log("clock set"); });
+$("btnReboot").onclick = () => run("reboot", rebootAndRestore);
+$("btnOff").onclick = () => run("power off", async l => {
+  rebootPending = true;
+  try { await l.ng([CMD_POWER, 0]); } catch {}
+  log("badge switched off (top button switches it on)");
+  await l.close(); link = null; custom = false; status = {}; rebootPending = false; stopLive(); refreshUi();
+});
+$("btnUsb").onclick = () => connectUsb().catch(e => e.name !== "NotFoundError" && log(e.message));
+$("btnBle").onclick = () => connectBle().catch(e => e.name !== "NotFoundError" && log(e.message));
+$("btnDisc").onclick = detach;
+$("btnTrafReset").onclick = () => traffic.reset();
+$("btnTrafLog").onclick = () => {
+  traffic.showLog = !traffic.showLog; store.set("trafLog", traffic.showLog);
+  $("btnTrafLog").classList.toggle("on", traffic.showLog); traffic.render();
+};
+$("btnRe").onclick = () => reconnect().catch(e => { log("reconnect: " + e.message); refreshUi(); });
+$("btnWatch").onclick = () => {
+  watch = !watch; misses = 0; store.set("watch", watch); refreshUi();
+  log("keep-alive " + (watch ? "on" : "off"));
+  if (watch && isLost && !link) autoReconnect();
+};
+
+// ---------------------------------------------------------------- messages
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("badge." + k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("badge." + k, JSON.stringify(v)); } catch {} },
+};
+let slots = store.get("slots", [{ text: "Hello!", mode: 0, speed: 4, blink: false, border: false }]);
+let selected = 0;
+$("font").value = store.get("font", "thin");
+
+function slotData(s) { return textBlocks(s.text || " ", $("font").value); }
+
+function renderSlots() {
+  const box = $("slots");
+  box.innerHTML = "";
+  slots.forEach((s, i) => {
+    const el = document.createElement("div");
+    el.className = "slot" + (i === selected ? " sel" : "");
+    el.innerHTML = `<span class="n">${i + 1}</span>
+      <input type="text" value="${esc(s.text)}" placeholder="text">
+      <button title="remove" ${slots.length < 2 ? "disabled" : ""}>✕</button>
+      <div class="opts">
+        <select>${SLOT_MODES.map((m, j) => `<option value="${j}" ${j === s.mode ? "selected" : ""}>${m}</option>`).join("")}</select>
+        <span>speed</span><input type="range" min="0" max="7" value="${s.speed}"><span>${s.speed}</span>
+        <label class="chk"><input type="checkbox" ${s.blink ? "checked" : ""}>blink</label>
+        <label class="chk"><input type="checkbox" ${s.border ? "checked" : ""}>border</label>
+      </div>`;
+    const [txt, del] = el.querySelectorAll(":scope > input, :scope > button");
+    const sel = el.querySelector("select"), rng = el.querySelector("input[type=range]");
+    const [blink, border] = el.querySelectorAll("input[type=checkbox]");
+    const changed = () => { store.set("slots", slots); select(i, false); };
+    el.addEventListener("focusin", () => select(i, true));
+    el.addEventListener("click", () => select(i, true));
+    txt.oninput = () => { s.text = txt.value; changed(); };
+    sel.onchange = () => { s.mode = +sel.value; changed(); };
+    rng.oninput = () => { s.speed = +rng.value; rng.nextElementSibling.textContent = rng.value; changed(); };
+    blink.onchange = () => { s.blink = blink.checked; changed(); };
+    border.onchange = () => { s.border = border.checked; changed(); };
+    del.onclick = ev => { ev.stopPropagation(); slots.splice(i, 1); selected = Math.min(selected, slots.length - 1); store.set("slots", slots); renderSlots(); select(selected, false); };
+    box.appendChild(el);
+  });
+}
+
+function select(i, rerender) {
+  if (i !== selected) { selected = i; if (rerender) document.querySelectorAll(".slot").forEach((e, j) => e.classList.toggle("sel", j === i)); }
+  const s = slots[selected];
+  sim.set(blocksToRows(slotData(s)), s);
+}
+
+$("btnAdd").onclick = () => {
+  if (slots.length >= 8) return log("the badge has 8 slots");
+  slots.push({ text: "", mode: 0, speed: 4, blink: false, border: false });
+  selected = slots.length - 1; store.set("slots", slots); renderSlots(); select(selected, false);
+  document.querySelectorAll(".slot input[type=text]")[selected].focus();
+};
+$("font").onchange = () => { store.set("font", $("font").value); select(selected, false); };
+$("btnSend").onclick = () => run("upload", async l => {
+  stopLive();
+  const data = slots.map(s => ({ ...s, data: slotData(s) }));
+  await l.upload(legacyPacket(data, l.yearByte()));
+  log(`sent ${data.length} message${data.length > 1 ? "s" : ""}`);
+});
+
+// ---------------------------------------------------------------- LED preview
+
+function drawLeds(canvas, frame, dimAll) {
+  const ctx = canvas.getContext("2d"), cw = canvas.width / COLS, ch = canvas.height / ROWS;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    const on = frame[y][x] && !dimAll;
+    ctx.fillStyle = on ? "#ff4d3d" : "#2a1714";
+    if (on) { ctx.shadowColor = "#ff4d3d"; ctx.shadowBlur = cw * 0.6; } else ctx.shadowBlur = 0;
+    ctx.beginPath(); ctx.arc((x + .5) * cw, (y + .5) * ch, Math.min(cw, ch) * .36, 0, 7); ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+}
+
+// rough simulation of the slot animations; good enough to judge text width and speed
+const sim = {
+  rows: null, slot: null, t: 0, last: 0,
+  set(rows, slot) { this.rows = rows; this.slot = slot; this.t = 0; },
+  frame() {
+    const R = this.rows, s = this.slot, w = R[0].length;
+    const f = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
+    const mode = SLOT_MODES[s.mode];
+    const put = (dx, dy) => { for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) { const sx = x - dx, sy = y - dy; if (sx >= 0 && sx < w && sy >= 0 && sy < ROWS && R[sy][sx]) f[y][x] = true; } };
+    const centerX = w < COLS ? (COLS - w) >> 1 : 0;
+    const scroll = w + COLS;
+    if (mode === "left" || mode === "fast" || (w > COLS && mode !== "right")) put(COLS - (this.t % scroll), 0);
+    else if (mode === "right") put((this.t % scroll) - w, 0);
+    else if (mode === "up") put(centerX, ROWS - (this.t % (ROWS * 3)));
+    else if (mode === "down") put(centerX, (this.t % (ROWS * 3)) - ROWS);
+    else put(centerX, 0);
+    if (s.border) for (let x = 0; x < COLS; x++) { f[0][x] = f[ROWS - 1][x] = (x + this.t) % 4 < 2; }
+    return f;
+  },
+};
+function tick(now) {
+  if (sim.rows && !live) {
+    const s = sim.slot, step = (SLOT_MODES[s.mode] === "fast" ? 25 : 170 - s.speed * 20);
+    if (now - sim.last > step) { sim.t++; sim.last = now; }
+    drawLeds($("matrix"), sim.frame(), s.blink && Math.floor(now / 500) % 2);
+  }
+  requestAnimationFrame(tick);
+}
+
+// ---------------------------------------------------------------- draw pad + live stream
+
+let pad = store.get("pad", null) || Array.from({ length: ROWS }, () => Array(COLS).fill(false));
+let live = false, liveDirty = false, liveSending = false;
+
+function drawPad() { drawLeds($("pad"), pad, false); if (live) { drawLeds($("matrix"), pad, false); pushLive(); } store.set("pad", pad); }
+
+function padCols() {
+  const out = [CMD_STREAM_BM];
+  for (let x = 0; x < COLS; x++) { let c = 0; for (let y = 0; y < ROWS; y++) if (pad[y][x]) c |= 1 << y; out.push(c & 0xff, c >> 8); }
+  return out;
+}
+
+// coalesce: send the latest pad when the previous write is done
+async function pushLive() {
+  liveDirty = true;
+  if (liveSending) return;
+  liveSending = true;
+  while (liveDirty && live && link) {
+    liveDirty = false;
+    await run("live", l => l.ng(padCols())).catch(() => {});
+  }
+  liveSending = false;
+}
+
+function stopLive(send) {
+  if (!live) return;
+  live = false; $("btnLive").classList.remove("on");
+  if (send && link) run("live off", l => l.ng([CMD_STREAM_SET, 1]));
+}
+
+$("btnLive").onclick = () => {
+  if (live) return stopLive(true);
+  live = true; $("btnLive").classList.add("on");
+  run("live", l => l.ng([CMD_STREAM_SET, 0])).then(() => drawPad(), () => stopLive());
+};
+
+{
+  const c = $("pad"); let paint = null;
+  const cell = e => { const r = c.getBoundingClientRect(); return [Math.floor((e.clientX - r.left) / r.width * COLS), Math.floor((e.clientY - r.top) / r.height * ROWS)]; };
+  c.addEventListener("pointerdown", e => {
+    const [x, y] = cell(e); if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return;
+    c.setPointerCapture(e.pointerId); paint = !pad[y][x]; pad[y][x] = paint; drawPad();
+  });
+  c.addEventListener("pointermove", e => {
+    if (paint == null) return;
+    const [x, y] = cell(e);
+    if (x >= 0 && x < COLS && y >= 0 && y < ROWS && pad[y][x] !== paint) { pad[y][x] = paint; drawPad(); }
+  });
+  c.addEventListener("pointerup", () => paint = null);
+  c.addEventListener("pointercancel", () => paint = null);
+}
+$("btnClear").onclick = () => { pad = pad.map(r => r.map(() => false)); drawPad(); };
+$("btnFill").onclick = () => { pad = pad.map(r => r.map(() => true)); drawPad(); };
+$("btnInvert").onclick = () => { pad = pad.map(r => r.map(v => !v)); drawPad(); };
+$("btnPadSend").onclick = () => run("upload", async l => {
+  stopLive();
+  await l.upload(legacyPacket([{ data: toBlocks(pad, false), mode: 4, speed: 4, blink: false, border: false }], l.yearByte()));
+  log("drawing sent (replaces all slots)");
+});
+
+// image: scale to 11 rows high, dark = lit (like badgetool image), centred / cropped to 44
+$("btnImg").onclick = () => $("imgFile").click();
+$("imgFile").onchange = async () => {
+  const f = $("imgFile").files[0]; if (!f) return;
+  const bmp = await createImageBitmap(f);
+  const w = Math.max(1, Math.round(bmp.width * ROWS / bmp.height));
+  const cv = new OffscreenCanvas(w, ROWS), ctx = cv.getContext("2d");
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, ROWS);
+  ctx.drawImage(bmp, 0, 0, w, ROWS);
+  const px = ctx.getImageData(0, 0, w, ROWS).data;
+  const off = w > COLS ? (w - COLS) >> 1 : 0, padL = w < COLS ? (COLS - w) >> 1 : 0;
+  pad = Array.from({ length: ROWS }, (_, y) => Array.from({ length: COLS }, (_, x) => {
+    const sx = x - padL + off; if (sx < 0 || sx >= w) return false;
+    const i = (y * w + sx) * 4; return (px[i] * .3 + px[i + 1] * .59 + px[i + 2] * .11) < 128;
+  }));
+  $("imgFile").value = ""; drawPad();
+};
+
+watch = store.get("watch", true);
+traffic.showLog = store.get("trafLog", true);
+$("btnTrafLog").classList.toggle("on", traffic.showLog); traffic.render();
+renderSlots(); select(0, false); drawPad(); refreshUi(); requestAnimationFrame(tick);
+</script>
+</body>
+</html>

@@ -192,6 +192,27 @@ Up to 8 messages. A `brightness` line from the official CLI's files is
 ignored; use `badgetool.py brightness` instead. A file saved with a UTF-8
 BOM (e.g. by PowerShell) is read correctly.
 
+## Web panel (`web/`)
+
+`web/index.html` is a control panel that runs in the browser, with no Python
+needed: open it in Chrome or Edge and connect over **USB** (WebHID, desktop
+only) or **Bluetooth** (Web Bluetooth, desktop and Android). It does text
+slots with a live preview of the scroll modes, a 44×11 draw pad that can
+mirror itself live onto the badge, images, the settings, reboot and power
+off. A keep-alive ping notices a lost badge within a few seconds and
+reconnects. A TX/RX monitor shows every packet.
+
+Both APIs need a secure context: `localhost`, a `file://` page or `https://`.
+It's a single file, so to use it from a phone, put `index.html` on any web
+server that has HTTPS. A self-signed certificate is fine: click through the
+warning once and Web Bluetooth works. Factory-firmware badges get text and
+images only. Over
+Bluetooth the status shows the battery percentage and firmware, like
+`badgetool.py`.
+
+`index.html` is built from `panel.src.html` by `python build.py`, which copies
+the fonts out of `badgetool.py`. Edit the source, then rebuild.
+
 ## Example scripts (`ng/`)
 
 Small standalone scripts from the development of the firmware, handy as
