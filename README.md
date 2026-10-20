@@ -46,6 +46,13 @@ What you notice, and what you can do now that you couldn't before:
 - **Control everything from the PC, over USB or Bluetooth.** `badgetool.py`
   reads the battery voltage and the badge's settings, sets the clock,
   brightness and Bluetooth name, and uploads text and images.
+- **A USB serial port that works, on Windows too.** Besides HID, the badge
+  has a serial port (COM port / `/dev/ttyACM*`). FOSSASIA's firmware ignored
+  the requests Windows sends when it opens a port, so it could only be used
+  on Linux, and nothing listened on it anyway. Now every command works over
+  it, at the same speed as HID (`badgetool.py --serial`). Handy where HID is
+  awkward: a terminal, a microcontroller, a phone, or a Linux box without
+  hidapi.
 - **The phone app works.** Uploads from the Badge Magic app were rejected
   unless you had switched on a PIN first; now they just work. Renaming the
   badge doesn't break the app either.
@@ -116,18 +123,21 @@ The CH582 board in these pictures is revision `B1144C_240525`. Look for the
 ## Requirements
 
 - Python 3.11 or newer (for `tomllib`)
-- `pip install hidapi bleak pillow`
-  - `bleak` is only needed for Bluetooth
-  - `pillow` is only needed for images
-- Windows, Linux or macOS. Development and testing were done on Windows 11.
-  On Linux, install [`linux/99-badgemagic.rules`](linux/99-badgemagic.rules)
-  (instructions inside) to use the badge without `sudo`. The rule hasn't been
-  tested on a Linux machine yet.
+- `pip install hidapi pyserial bleak pillow`, or only what you use:
+  - `hidapi` for USB HID (the default channel)
+  - `pyserial` for USB serial (`--serial`)
+  - `bleak` for Bluetooth
+  - `pillow` for images
+- Windows, Linux or macOS. Development and testing were done on Windows 11;
+  USB serial was also tested on Ubuntu 26.04. On Linux, install
+  [`linux/99-badgemagic.rules`](linux/99-badgemagic.rules) (instructions
+  inside) to use the badge without `sudo`. It also keeps ModemManager away
+  from the serial port, whose probing would garble the commands.
 
 ## Quick start
 
 ```sh
-python badgetool.py                 # interactive menu: pick USB / BLE, then a badge
+python badgetool.py                 # interactive menu: pick USB HID / serial / BLE, then a badge
 python badgetool.py list            # badges on USB
 python badgetool.py status          # everything the badge reports
 python badgetool.py text "Hello" "Second slot" --mode center
@@ -137,7 +147,7 @@ python badgetool.py text "Hello" "Second slot" --mode center
 
 | Command | What it does |
 |---|---|
-| `list` | badges on USB, or in range with `--ble` |
+| `list` | badges on USB (and their serial ports), or in range with `--ble` |
 | `status` | mode, clock, brightness, Bluetooth settings, battery |
 | `battery [-w SECONDS]` | voltage, raw ADC value and charging state, optionally refreshed |
 | `time` | sets the badge clock to the PC time |
@@ -161,9 +171,15 @@ python badgetool.py status -i 1                      # second badge on USB
 python badgetool.py status --ble                     # scan and pick
 python badgetool.py status --ble AA:BB:CC:DD:EE:FF   # by Bluetooth address
 python badgetool.py status --ble 11-22-33-44-55-66-77-88   # by chip UID (as wchisp prints it)
+python badgetool.py status --serial                  # USB serial, port found automatically
+python badgetool.py status --serial COM36            # or /dev/ttyACM0
 ```
 
 The options also work after the command (`badgetool.py text Hi --ble`).
+Over USB serial everything works the same as over HID, including `status`,
+`battery` and the reboots (it waits for the port to come back). It needs
+the patched firmware from 2026-10-20 or later: on Windows, older builds
+can't be opened at all.
 You can do everything over BLE except `flash`. Over BLE, `status` and
 `battery` show only the battery percentage and device info for now. A badge that is
 connected stops advertising, so close other BLE sessions, such as the
@@ -228,9 +244,11 @@ firmware.
 
 | Script | What it does |
 |---|---|
-| `badge_ng.py` | minimal `ng` client over USB HID, plus `ble_find()` |
+| `badge_ng.py` | minimal `ng` client over USB HID or serial, plus `ble_find()`; `HidBadge.paths()` for several badges |
 | `badge_display.py` | push PIL images to the badge as a live 44×11 display |
 | `test_stream.py` | streaming test patterns, measures USB frame rate (~60 fps) |
+| `test_serial.py` | the same over USB serial; optional port argument |
+| `screen_mirror.py` | mirrors the screen (or the area around the mouse) live; several badges stack into one taller display. All options are in `CONFIG` at the top and on the command line |
 | `battery.py`, `set_time.py`, `set_brightness.py` | single settings over USB |
 | `ble_always_on.py`, `fix_alwayson.py`, `apply_cfg.py` | config + reboot (`apply_cfg.py` resets to defaults, including the name) |
 | `ble_check.py` | connect over BLE and list services; optional address argument |
@@ -377,6 +395,15 @@ place than the factory one.
   now feed the same command parser (framed as `'N' 'G' len payload`), and
   everything else still goes to the legacy upload, so the official CLI keeps
   working. This is what lets `badgetool.py` do everything over USB.
+- **USB serial port unusable on Windows:** the firmware ignored the requests
+  a host sends when it opens a COM port (`SET_LINE_CODING`,
+  `GET_LINE_CODING`, `SET_CONTROL_LINE_STATE`), so Windows failed the open
+  with error 31. They are answered now (the baud rate is stored and
+  ignored). On top of that: the serial data endpoint had the same
+  zero-length-IN bug as HID, `status`/`battery` replies only ever went out
+  over HID, frames packed back to back in one USB packet lost their tail,
+  and every setup packet was handled twice. Serial streaming now runs as
+  well as HID, on Windows and Linux (`ng/test_serial.py`).
 - **USB upload state never reset:** `legacy_usb_rx()` didn't reset its
   length counters after a transfer, so a following upload could be misread.
 - **LEDs stuck on after switching off:** the LED timer kept running into
@@ -462,6 +489,9 @@ place than the factory one.
 
 - `ng` misc commands: set time (2), battery reply `BAT` (3), status reply
   `STA` (4).
+- `ng` commands over USB serial: frames as a plain byte stream (back to back,
+  split across USB packets any way the host likes), with the `STA`/`BAT`
+  replies on the same port. Legacy uploads work over serial too.
 
 ### Building
 
@@ -494,10 +524,13 @@ with `badgetool.py flash path/to/badgemagic-ch582.bin`.
 
 ## Protocol notes
 
-| | USB HID (`0416:5020`) | BLE |
-|---|---|---|
-| Legacy upload | 64-byte reports | service `fee0`, characteristic `fee1`, 16-byte writes |
-| `ng` commands | `'N' 'G' len16 payload` in 64-byte reports | service `f055`: write `f057`, notify `f056` |
+| | USB HID (`0416:5020`, interface 0) | USB serial (interface 1) | BLE |
+|---|---|---|---|
+| Legacy upload | 64-byte reports | the packet as is, unpadded | service `fee0`, characteristic `fee1`, 16-byte writes |
+| `ng` commands | `'N' 'G' len16 payload` in 64-byte reports | the same frames as a byte stream, no padding | service `f055`: write `f057`, notify `f056` |
+| Replies (`STA`, `BAT`) | 64-byte IN report | 64 bytes on the port | not yet |
+
+The serial port ignores the baud rate; any setting works.
 
 `ng` commands: power (1), stream set (2), stream bitmap (3), BLE settings (4),
 save (6), misc (8: splash, brightness, time, battery, status).
@@ -507,11 +540,6 @@ renaming a badge keeps it compatible with the app.
 
 ## Ideas / not done yet
 
-- **USB serial (CDC):** Windows rejects the port with error 31 because the
-  firmware ignores the line-coding requests (`SET_LINE_CODING`,
-  `GET_LINE_CODING`, `SET_CONTROL_LINE_STATE`). The CDC OUT handler also
-  still has the zero-length-IN bug that was fixed for HID. `--serial` is a
-  stub until that is fixed.
 - **Status and battery over BLE:** the replies currently go out over USB HID
   only. Sending them as `f056` notifications would give BLE the full
   `status` (voltage, clock, settings) instead of just the battery percentage.

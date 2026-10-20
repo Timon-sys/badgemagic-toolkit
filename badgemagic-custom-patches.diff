@@ -502,7 +502,7 @@ index ca7d0c6..4b90829 100644
  void legacy_set_auth_code(uint16_t code);  // called from main.c on BT-PAIRING entry
  void legacy_reset_auth();                   // called from peripheral.c on disconnect
 diff --git a/src/main.c b/src/main.c
-index 7b4b3c6..acd955d 100644
+index 7b4b3c6..b851405 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -26,6 +26,7 @@
@@ -922,8 +922,8 @@ index 7b4b3c6..acd955d 100644
  
 -	cdc_onWrite(legacy_usb_rx);
 -	hiddev_onWrite(legacy_usb_rx);
-+	/* ng_usb_rx() hands anything that is not an ng frame to legacy_usb_rx(). */
-+	cdc_onWrite(ng_usb_rx);
++	/* ng_usb_rx()/ng_cdc_rx() hand anything that is not an ng frame to legacy_usb_rx(). */
++	cdc_onWrite(ng_cdc_rx);
 +	hiddev_onWrite(ng_usb_rx);
  	usb_start();
  
@@ -1028,19 +1028,22 @@ index 7b4b3c6..acd955d 100644
  }
 \ No newline at end of file
 diff --git a/src/ngctrl.c b/src/ngctrl.c
-index b5a687e..fb7e058 100644
+index b5a687e..8e68091 100644
 --- a/src/ngctrl.c
 +++ b/src/ngctrl.c
-@@ -8,6 +8,8 @@
+@@ -8,6 +8,11 @@
  #include "debug.h"
  #include "config.h"
  #include "leddrv.h"
 +#include "legacyctrl.h"
 +#include "usb/usb.h"
++
++/* Replies go back over the USB interface the request came in on */
++static void (*ng_reply)(uint8_t *buf, uint8_t len) = hiddev_reply;
  
  // TODO: Some of configs can be added, just listing:
  // - Remote brighness adjusting
-@@ -161,6 +163,72 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
+@@ -161,6 +166,72 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
  	return 0;
  }
  
@@ -1065,7 +1068,7 @@ index b5a687e..fb7e058 100644
 +	int mv = batt_raw2mv(raw);
 +	uint8_t r[64] = { 'B', 'A', 'T', raw & 0xff, raw >> 8, mv & 0xff, mv >> 8,
 +	                  (uint8_t)charging_status() };
-+	hiddev_reply(r, sizeof(r));
++	ng_reply(r, sizeof(r));
 +	return 0;
 +}
 +
@@ -1106,14 +1109,14 @@ index b5a687e..fb7e058 100644
 +	const char *v = VERSION;
 +	for (int i = 0; i < 20 && v[i]; i++)
 +		r[44 + i] = v[i];
-+	hiddev_reply(r, sizeof(r));
++	ng_reply(r, sizeof(r));
 +	return 0;
 +}
 +
  uint8_t misc(uint8_t *val, uint16_t len)
  {
  	PRINT(__func__);
-@@ -170,6 +238,9 @@ uint8_t misc(uint8_t *val, uint16_t len)
+@@ -170,6 +241,9 @@ uint8_t misc(uint8_t *val, uint16_t len)
  	const uint8_t (*misc_cmd[])(uint8_t *, uint16_t) = {
  		cfg_splash_speed,
  		cfg_led_brightness,
@@ -1123,7 +1126,7 @@ index b5a687e..fb7e058 100644
  	};
  
  	uint8_t fn = val[0];
-@@ -194,6 +265,54 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
+@@ -194,6 +268,100 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
  
  #define CMD_LUT_LEN (sizeof(cmd_lut) / sizeof(cmd_lut[0]))
  
@@ -1144,34 +1147,80 @@ index b5a687e..fb7e058 100644
 +static uint16_t ng_usb_expect;
 +static uint16_t ng_usb_have;
 +
-+int ng_usb_rx(uint8_t *buf, uint16_t len)
++/* Feed one USB packet (or the start of one) into the reassembler and return
++ * how many bytes of it were used. A frame in progress is marked by
++ * ng_usb_expect, not ng_usb_have, so a packet holding only a header counts. */
++static uint16_t ng_usb_feed(uint8_t *buf, uint16_t len)
 +{
-+	if (ng_usb_have == 0) {
++	uint16_t used = 0;
++
++	if (ng_usb_expect == 0) {
 +		if (legacy_usb_busy() || len < NG_USB_HDR_LEN
-+		    || buf[0] != 'N' || buf[1] != 'G')
-+			return legacy_usb_rx(buf, len);
++		    || buf[0] != 'N' || buf[1] != 'G') {
++			legacy_usb_rx(buf, len);
++			return len;
++		}
 +
 +		ng_usb_expect = buf[2] | (buf[3] << 8);
-+		if (ng_usb_expect == 0 || ng_usb_expect > NG_USB_BUF_SIZE) {
++		if (ng_usb_expect > NG_USB_BUF_SIZE)
 +			ng_usb_expect = 0;
-+			return -1;
-+		}
++		if (ng_usb_expect == 0)
++			return len;
 +
 +		buf += NG_USB_HDR_LEN;
 +		len -= NG_USB_HDR_LEN;
++		used = NG_USB_HDR_LEN;
 +	}
 +
 +	if (len > ng_usb_expect - ng_usb_have)
 +		len = ng_usb_expect - ng_usb_have;
 +	tmos_memcpy(ng_usb_buf + ng_usb_have, buf, len);
 +	ng_usb_have += len;
++	used += len;
 +
 +	if (ng_usb_have < ng_usb_expect)
-+		return 0;
++		return used;
 +
 +	ng_parse(ng_usb_buf, ng_usb_expect);
 +	ng_usb_have = 0;
 +	ng_usb_expect = 0;
++	return used;
++}
++
++/* HID: one frame per report, the rest of a report after a frame is padding */
++int ng_usb_rx(uint8_t *buf, uint16_t len)
++{
++	ng_reply = hiddev_reply;
++	ng_usb_feed(buf, len);
++	return 0;
++}
++
++/* CDC is a byte stream: the host packs frames back to back, so a packet can
++ * end one frame and start the next, and a header can be split between two
++ * packets. Keep feeding until the packet is used up. */
++int ng_cdc_rx(uint8_t *buf, uint16_t len)
++{
++	static uint8_t hdr[NG_USB_HDR_LEN];
++	static uint16_t hdr_have;
++
++	ng_reply = cdc_reply;
++	while (len) {
++		if (ng_usb_expect == 0 && !legacy_usb_busy()
++		    && (hdr_have || len < NG_USB_HDR_LEN)) {
++			while (hdr_have < NG_USB_HDR_LEN && len) {
++				hdr[hdr_have++] = *buf++;
++				len--;
++			}
++			if (hdr_have < NG_USB_HDR_LEN)
++				return 0;
++			hdr_have = 0;
++			ng_usb_feed(hdr, NG_USB_HDR_LEN);
++			continue;
++		}
++		uint16_t n = ng_usb_feed(buf, len);
++		buf += n;
++		len -= n;
++	}
 +	return 0;
 +}
 +
@@ -1179,14 +1228,15 @@ index b5a687e..fb7e058 100644
  {
  	if (len < 1) return bleInvalidRange;
 diff --git a/src/ngctrl.h b/src/ngctrl.h
-index 460af28..a400ef7 100644
+index 460af28..862cd49 100644
 --- a/src/ngctrl.h
 +++ b/src/ngctrl.h
-@@ -16,5 +16,6 @@ uint8_t flash_splash_screen(uint8_t *val, uint16_t len);
+@@ -16,5 +16,7 @@ uint8_t flash_splash_screen(uint8_t *val, uint16_t len);
  
  extern const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len);
  uint8_t ng_parse(uint8_t *val, uint16_t len);
 +int ng_usb_rx(uint8_t *buf, uint16_t len);
++int ng_cdc_rx(uint8_t *buf, uint16_t len);
  
  #endif /* __NG_CTRL_H__ */
 diff --git a/src/pong.c b/src/pong.c
@@ -1314,6 +1364,156 @@ index 199a96e..c062511 100644
 +int batt_raw2mv(int r);
  
  #endif /* __RESET_H__ */
+diff --git a/src/usb/composite/cdc-serial.c b/src/usb/composite/cdc-serial.c
+index 99f0c40..9a3e0ac 100644
+--- a/src/usb/composite/cdc-serial.c
++++ b/src/usb/composite/cdc-serial.c
+@@ -12,6 +12,10 @@
+ 
+ #define USB_DESCTYPE_CS_INTERFACE 0x24
+ 
++#ifndef MIN
++#define MIN(x, y) (((x) < (y)) ? (x) : (y))
++#endif
++
+ static __attribute__((aligned(4))) uint8_t noti_ep_buf[64 + 64]; 
+ static uint8_t *const noti_ep_out = noti_ep_buf;
+ static uint8_t *const noti_ep_in = noti_ep_buf + 64;
+@@ -91,10 +95,51 @@ static USB_ENDP_DESCR rx_ep_desc = {
+ 	.bInterval = 0xff
+ };
+ 
++/* CDC class requests (bRequest) */
++#define CDC_SET_LINE_CODING        0x20
++#define CDC_GET_LINE_CODING        0x21
++#define CDC_SET_CONTROL_LINE_STATE 0x22
++#define CDC_SEND_BREAK             0x23
++
++/* dwDTERate (LE), bCharFormat, bParityType, bDataBits. Only stored and handed
++ * back: the data moves at USB speed whatever the host sets. 115200 8N1. */
++static uint8_t line_coding[7] = { 0x00, 0xc2, 0x01, 0x00, 0, 0, 8 };
++
++static void set_line_coding_data(uint8_t *buf, uint8_t len)
++{
++	memcpy(line_coding, buf, MIN(len, sizeof(line_coding)));
++	ctrl_ack();
++}
++
++/* Windows' usbser.sys sends SET_LINE_CODING and SET_CONTROL_LINE_STATE when
++ * a port is opened and fails the open if they go unanswered; Linux does not
++ * wait for them, which is why the port only ever worked there. */
+ static void cdc_request_handler(USB_SETUP_REQ * request)
+ {
+ 	_TRACE();
+-	// Handle CDC Class Request here
++	/* ctrl.c routes every EP0 token here while ep0buf still holds our
++	 * setup packet; only the SETUP itself needs an answer. */
++	if ((R8_USB_INT_ST & MASK_UIS_TOKEN) != UIS_TOKEN_SETUP)
++		return;
++
++	switch (request->bRequest) {
++	case CDC_SET_LINE_CODING:
++		ctrl_expect_out(set_line_coding_data);
++		break;
++
++	case CDC_GET_LINE_CODING:
++		ctrl_start_load_block(line_coding,
++				MIN(request->wLength, sizeof(line_coding)));
++		break;
++
++	case CDC_SET_CONTROL_LINE_STATE:	/* DTR/RTS: nothing to switch */
++	case CDC_SEND_BREAK:
++		ctrl_ack();
++		break;
++
++	default:
++		break;
++	}
+ }
+ 
+ static void noti_ep_handler()
+@@ -104,27 +149,50 @@ static void noti_ep_handler()
+ }
+ 
+ static volatile uint16_t transferred;
++static int in_tog;		/* DATA0/1 of the next IN packet */
++static uint8_t reply_len;	/* armed by cdc_reply() after the OUT ack */
++static int zlp_due;		/* a full-size reply needs a ZLP to end it */
++
++/* Same scheme as hiddev.c: arm IN only via the T_* bits, so the OUT side
++ * (and its data toggle) is never touched by a reply. */
++static void arm_in(uint8_t len)
++{
++	R8_UEP3_T_LEN = len;
++	R8_UEP3_CTRL = (R8_UEP3_CTRL & ~(MASK_UEP_T_RES | RB_UEP_T_TOG))
++		| UEP_T_RES_ACK | (in_tog ? RB_UEP_T_TOG : 0);
++	in_tog = !in_tog;
++	transferred = 0;
++}
+ 
+ static void data_ep_handler()
+ {
+ 	_TRACE();
+-	static int tog;
+ 
+ 	uint8_t token = R8_USB_INT_ST & MASK_UIS_TOKEN;
+ 	switch(token) {
+ 	case UIS_TOKEN_OUT:
+ 		if (on_write)
+ 			on_write(data_ep_out, R8_USB_RX_LEN);
+-		tog = !tog;
+-		set_handshake(DATA_EP_NUM, USB_ACK, tog, 0);
++		/* Only the OUT (R_*) side. This used set_handshake(), which
++		 * also queued a zero-length IN after every OUT. */
++		R8_UEP3_CTRL = ((R8_UEP3_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK)
++			^ RB_UEP_R_TOG;
++		if (reply_len) {
++			arm_in(reply_len);
++			zlp_due = (reply_len == MAX_PACKET_SIZE);
++			reply_len = 0;
++		}
+ 		break;
+ 
+ 	case UIS_TOKEN_IN:
+-		if (transferred == 0) {
+-			transferred = 1;
+-		} else {
+-			set_handshake(DATA_EP_NUM, USB_NAK, 1, 0);
++		if (zlp_due) {
++			zlp_due = 0;
++			arm_in(0);
++			break;
+ 		}
++		/* sent: NAK until the next one instead of resending it */
++		R8_UEP3_CTRL = (R8_UEP3_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_NAK;
++		transferred = 1;
+ 		break;
+ 	
+ 	default:
+@@ -139,13 +207,18 @@ void cdc_fill_IN(uint8_t *buf, uint8_t len)
+ 	if (len > tx_ep_desc.wMaxPacketSize)
+ 		return;
+ 
+-	static int tog;
+-
+ 	memcpy(data_ep_in, buf, len);
+-	set_handshake(DATA_EP_NUM, USB_ACK, tog, len);
++	arm_in(len);
++}
+ 
+-	tog = !tog;
+-	transferred = 0;
++/* Queue a reply to the OUT packet currently being handled (call it from the
++ * on_write callback). It is armed once the OUT has been acknowledged. */
++void cdc_reply(uint8_t *buf, uint8_t len)
++{
++	if (len > tx_ep_desc.wMaxPacketSize)
++		return;
++	memcpy(data_ep_in, buf, len);
++	reply_len = len;
+ }
+ 
+ static int wait_until_sent(uint16_t timeout_ms)
 diff --git a/src/usb/composite/hiddev.c b/src/usb/composite/hiddev.c
 index bb075e5..3e41216 100644
 --- a/src/usb/composite/hiddev.c
@@ -1401,15 +1601,90 @@ index bb075e5..3e41216 100644
  static int wait_until_sent(uint16_t timeout_ms)
  {
  	while(timeout_ms--) {
+diff --git a/src/usb/ctrl.c b/src/usb/ctrl.c
+index 30aa7dd..5c31b8a 100644
+--- a/src/usb/ctrl.c
++++ b/src/usb/ctrl.c
+@@ -24,6 +24,19 @@ void ctrl_start_load_block(void *buf, uint16_t len)
+ 	usb_start_load_block(ep0buf, buf, len, 1);
+ }
+ 
++/* Claimed by an interface handler for the OUT data stage of its request */
++static void (*out_stage)(uint8_t *buf, uint8_t len);
++
++/* Take the OUT data stage of the request in the current SETUP (e.g. CDC
++ * SET_LINE_CODING). The data lands in ep0buf, over the setup packet, so it
++ * cannot be routed by recipient like the SETUP was. cb gets the data and must
++ * answer the status stage, normally with ctrl_ack(). */
++void ctrl_expect_out(void (*cb)(uint8_t *buf, uint8_t len))
++{
++	out_stage = cb;
++	R8_UEP0_CTRL = UEP_R_RES_ACK | RB_UEP_R_TOG | UEP_T_RES_NAK; /* DATA1 */
++}
++
+ static void route_interfaces(USB_SETUP_REQ *request)
+ {
+ 	_TRACE();
+@@ -41,6 +54,16 @@ static void ep_handler()
+ 
+ 	USB_SETUP_REQ *request = (USB_SETUP_REQ *)ep0buf;
+ 	uint8_t req = request->bRequest;
++	uint8_t token = R8_USB_INT_ST & MASK_UIS_TOKEN;
++
++	if (token == UIS_TOKEN_SETUP) {
++		out_stage = NULL;	/* a new request ends any old one */
++	} else if (token == UIS_TOKEN_OUT && out_stage) {
++		void (*cb)(uint8_t *buf, uint8_t len) = out_stage;
++		out_stage = NULL;
++		cb(ep0buf, R8_USB_RX_LEN);
++		return;
++	}
+ 
+ 	/* Each interface will have their own request handler */
+ 	uint8_t recip = request->bRequestType & USB_REQ_RECIP_MASK;
+@@ -49,7 +72,6 @@ static void ep_handler()
+ 		return;
+ 	}
+ 
+-	uint8_t token = R8_USB_INT_ST & MASK_UIS_TOKEN;
+ 	switch(token) {
+ 
+ 	case UIS_TOKEN_SETUP:
+@@ -90,6 +112,10 @@ static void route_enpoints()
+ 	uint8_t token = R8_USB_INT_ST & MASK_UIS_TOKEN;
+ 	if (token == UIS_TOKEN_SETUP) {
+ 		ep_handlers[0]();
++		/* Done: a SETUP on EP0 used to run the handler a second time,
++		 * which then parsed whatever the first run had loaded into
++		 * ep0buf as if it were another setup packet. */
++		return;
+ 	}
+ 
+ 	uint8_t ep_num = R8_USB_INT_ST & MASK_UIS_ENDP;
 diff --git a/src/usb/usb.h b/src/usb/usb.h
-index f1d41f9..74df77e 100644
+index f1d41f9..7a26f31 100644
 --- a/src/usb/usb.h
 +++ b/src/usb/usb.h
-@@ -8,6 +8,7 @@ int cdc_tx_poll(uint8_t *buf, int len, uint16_t timeout_ms);
+@@ -6,8 +6,10 @@
+ void cdc_fill_IN(uint8_t *buf, uint8_t len);
+ int cdc_tx_poll(uint8_t *buf, int len, uint16_t timeout_ms);
  void cdc_onWrite(void (*cb)(uint8_t *buf, uint16_t len));
++void cdc_reply(uint8_t *buf, uint8_t len);
  
  void hiddev_fill_IN(uint8_t *buf, uint8_t len);
 +void hiddev_reply(uint8_t *buf, uint8_t len);
  int hiddev_tx_poll(uint8_t *buf, int len, uint16_t timeout_ms);
  void hiddev_onWrite(void (*cb)(uint8_t *buf, uint16_t len));
  
+diff --git a/src/usb/utils.h b/src/usb/utils.h
+index 595a8b7..d6ba39d 100644
+--- a/src/usb/utils.h
++++ b/src/usb/utils.h
+@@ -23,6 +23,7 @@ void usb_flush();
+ 
+ void set_handshake(uint8_t ep_num, int type, int tog, uint8_t len);
+ void ctrl_ack();
++void ctrl_expect_out(void (*cb)(uint8_t *buf, uint8_t len));
+ 
+ void clear_handshake_sent_flag();
+ int handshake_sent();

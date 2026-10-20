@@ -97,10 +97,11 @@ class HidBadge(Badge):
 
 
 class SerialBadge(Badge):
-    """USB CDC transport.
+    """USB CDC transport (the badge's COM port / ttyACM).
 
-    This firmware's CDC does not implement SET_LINE_CODING, so pyserial
-    cannot open the port on Windows. Works on Linux/macOS.
+    Needs firmware from 2026-10-20 or later on Windows: older builds ignore
+    SET_LINE_CODING, so opening the COM port fails with error 31 there
+    (Linux/macOS never waited for it). The baud rate is ignored.
     """
 
     def __init__(self, port):

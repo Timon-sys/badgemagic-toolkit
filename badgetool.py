@@ -20,7 +20,8 @@ Run without arguments for an interactive menu, or use a command:
 Channel (default USB HID):
   --ble                 scan and pick a badge over Bluetooth
   --ble AA:BB:CC:DD:EE:FF   or a chip UID like 11-22-33-44-55-66-77-88
-  --serial              not supported yet (see SerialBadge)
+  --serial [PORT]       USB serial (COM port / ttyACM) instead of HID; without a
+                        port the badge is found automatically (-i N picks one)
 Over BLE everything works except flash; status and battery show only the
 battery % + device info (no voltage, clock or settings yet).
 
@@ -42,7 +43,10 @@ import sys
 import tomllib
 import time
 
-import hid
+try:
+    import hid  # pip install hidapi; only USB HID needs it
+except ImportError:
+    hid = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # wchisp: tools/wchisp-win-x64/ or tools/ next to this file, else PATH; None = not installed
@@ -245,6 +249,8 @@ THIN_FONT = U8g2Font(LUCASFONT_U8G2)
 
 def find_badges():
     out = []
+    if hid is None:
+        return out
     for d in hid.enumerate(VID, PID):
         if d.get("interface_number", 0) not in (0, -1):
             continue
@@ -499,30 +505,93 @@ class BleBadge:
     upload_bitmap = Badge.upload_bitmap
 
 
-class SerialBadge:
-    """CDC serial (the badge's second USB interface, a COM port).
+def find_serial_ports():
+    """COM ports / ttyACM devices of badges (their USB serial interface)."""
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return []
+    return sorted(p.device for p in list_ports.comports() if (p.vid, p.pid) == (VID, PID))
 
-    Not implemented yet. The firmware already feeds CDC writes into the same
-    ng parser as HID, but Windows cannot open the port: cdc_request_handler()
-    in src/usb/composite/cdc-serial.c ignores SET_LINE_CODING /
-    GET_LINE_CODING / SET_CONTROL_LINE_STATE, so opening the COM port fails
-    with error 31 (pyserial: "A device attached to the system is not
-    functioning"). The CDC OUT handler also has the zero-length-IN toggle bug
-    that was fixed for HID, and status/battery replies only go out over HID.
+
+class SerialBadge(Badge):
+    """USB serial (the badge's second USB interface, a COM port / ttyACM).
+
+    Same commands as HID: ng frames go out as a plain byte stream (no 64-byte
+    padding) and status/battery replies come back on the port. Needs the
+    firmware from 2026-10-20 or later; older builds can't be opened on Windows
+    (error 31) and only reply over HID.
     """
 
-    def __init__(self, *a, **kw):
-        sys.exit("serial is not supported yet (firmware can't be opened as a COM port on Windows)")
+    def __init__(self, port):
+        try:
+            import serial
+        except ImportError:
+            sys.exit("USB serial needs pyserial: pip install pyserial")
+        try:
+            self.s = serial.Serial(port, 115200, timeout=1.0)  # the baud rate is ignored
+        except serial.SerialException as e:
+            raise RuntimeError(f"can't open {port}: {e}. Firmware older than 2026-10-20 "
+                               "can't be opened on Windows ('badgetool.py flash')")
+        self.port = port
+        self.kind = "custom"  # the stock firmwares have no serial interface we can use
+        self.info = {"man": "serial", "prod": port}
+
+    def close(self):
+        try:
+            self.s.close()
+        except Exception:
+            pass
+
+    def write_reports(self, data):
+        self.s.write(data)
+        self.s.flush()
+
+    def ng(self, payload):
+        self.write_reports(b"NG" + struct.pack("<H", len(payload)) + payload)
+
+    def ng_query(self, payload, magic):
+        self.s.reset_input_buffer()
+        self.ng(payload)
+        r = self.s.read(64)
+        if r[:3] != magic:
+            raise RuntimeError("no reply over serial; replies over serial need the firmware "
+                               "from 2026-10-20 or later ('badgetool.py flash')")
+        return r
+
+    def upload_slots(self, slots):
+        # Unpadded, unlike HID: the firmware stores exactly what arrives. The
+        # "wang" header has to start a fresh USB packet, so let anything
+        # written just before go out first.
+        time.sleep(0.05)
+        self.write_reports(legacy_packet(slots))
 
 
-# channel picked in the menu / by --ble; None = USB HID
-SESSION = {"ble": None}
+def open_serial(port, idx=None):
+    if port == "auto":
+        ports = find_serial_ports()
+        if not ports:
+            sys.exit("no badge serial port found (plugged in? pyserial installed?)")
+        idx = idx or 0
+        if not 0 <= idx < len(ports):
+            sys.exit(f"no serial badge #{idx}; found {', '.join(ports)}")
+        if len(ports) > 1 and idx == 0:
+            print(f"note: {len(ports)} serial badges ({', '.join(ports)}), using {ports[0]} (pick with -i N)")
+        port = ports[idx]
+    return SerialBadge(port)
+
+
+# channel picked in the menu / by --ble / --serial; both None = USB HID
+SESSION = {"ble": None, "serial": None}
 
 
 def open_one(args=None):
     ble = getattr(args, "ble", None)
-    if getattr(args, "serial", False):
-        return SerialBadge()
+    port = getattr(args, "serial", None)
+    if port:
+        return open_serial(port, getattr(args, "index", None))
+    if SESSION["serial"] is not None and ble is None:
+        return SerialBadge(SESSION["serial"])
     if SESSION["ble"] is not None and ble is None:
         return SESSION["ble"]
     if ble:
@@ -535,6 +604,8 @@ def open_one(args=None):
             pick = int(input("which one? ")) if len(found) > 1 else 0
             ble = found[pick][0]
         return BleBadge(ble_address(ble))
+    if hid is None:
+        sys.exit("USB HID needs hidapi (pip install hidapi); or use --serial / --ble")
     badges = find_badges()
     if not badges:
         sys.exit("no badge found on USB (is it plugged in and switched on?)")
@@ -582,6 +653,27 @@ def reboot_and_restore_time(b):
             SESSION["ble"] = b2
         else:
             b2.close()
+        return
+    if isinstance(b, SerialBadge):
+        port = b.port
+        b.reset()
+        b.close()
+        print("badge rebooting ...")
+        time.sleep(3)  # let the old port disappear first
+        end = time.time() + 30
+        while time.time() < end:
+            if port in find_serial_ports():
+                time.sleep(1)
+                try:
+                    b2 = SerialBadge(port)
+                    b2.set_time()
+                    b2.close()
+                    print("back up, clock restored")
+                    return
+                except RuntimeError:
+                    pass
+            time.sleep(1)
+        print("badge did not come back within 30 s; run 'badgetool.py time' later")
         return
     b.reset()
     b.close()
@@ -660,7 +752,9 @@ def cmd_list(a):
             print(f"#{i}  {addr}  {name or '(no name)'}  {rssi} dBm")
         return
     badges = find_badges()
-    if not badges:
+    if hid is None:
+        print("USB HID not checked (no hidapi: pip install hidapi)")
+    elif not badges:
         print("no badge on USB")
     for i, b in enumerate(badges):
         what = {"custom": "CH582, custom firmware (full control)",
@@ -678,6 +772,9 @@ def cmd_list(a):
             except Exception:
                 pass
         print(f"#{i}  {what}{extra}")
+    ports = find_serial_ports()
+    if ports:
+        print("serial ports (--serial):", ", ".join(ports))
     if WCHISP:
         r = subprocess.run([WCHISP, "probe"], capture_output=True, text=True)
         if "Found 0" not in (r.stdout + r.stderr) and "Device #" in (r.stdout + r.stderr):
@@ -801,7 +898,8 @@ def cmd_text(a):
     b = open_one(a)
     b.upload_slots(slots)
     b.close()
-    via = "Bluetooth" if isinstance(b, BleBadge) else "USB"
+    via = ("Bluetooth" if isinstance(b, BleBadge)
+           else "USB serial" if isinstance(b, SerialBadge) else "USB")
     print(f"uploaded {len(slots)} message(s) over {via} "
           f"({sum(sl['groups'] for sl in slots) * 8} px wide in total, mode {a.mode}, speed {a.speed})")
 
@@ -841,7 +939,8 @@ def cmd_upload(a):
     b = open_one(a)
     b.upload_slots(slots)
     b.close()
-    via = "Bluetooth" if isinstance(b, BleBadge) else "USB"
+    via = ("Bluetooth" if isinstance(b, BleBadge)
+           else "USB serial" if isinstance(b, SerialBadge) else "USB")
     print(f"uploaded {len(slots)} slot(s) from {os.path.basename(a.file)} over {via}")
 
 
@@ -926,7 +1025,7 @@ def pick_channel():
     while True:
         print("\nHow do you want to talk to the badge?")
         print(" 1  USB HID")
-        print(" 2  USB serial (COM port) - not supported yet")
+        print(" 2  USB serial (COM port / ttyACM)")
         print(" 3  Bluetooth")
         print(" q  quit")
         c = input("> ").strip().lower()
@@ -940,8 +1039,24 @@ def pick_channel():
             cmd_list(ns())
             return True
         if c == "2":
-            print("Serial needs a firmware fix first: Windows can't open the badge's COM port yet.")
-            continue
+            ports = find_serial_ports()
+            if not ports:
+                print("no badge serial port - plugged in? (needs pyserial: pip install pyserial)")
+                continue
+            for i, port in enumerate(ports):
+                print(f"#{i}  {port}")
+            pick = input("which one? ").strip() if len(ports) > 1 else "0"
+            try:
+                port = ports[int(pick or 0)]
+                SerialBadge(port).close()  # fail here, not in the first command
+            except (ValueError, IndexError):
+                continue
+            except RuntimeError as e:
+                print(e)
+                continue
+            SESSION["serial"] = port
+            print("using", port)
+            return True
         if c == "3":
             print(" 1  scan for badges")
             print(" 2  enter address or chip UID")
@@ -1066,12 +1181,13 @@ def main():
     p.add_argument("-i", "--index", type=int, help="badge number from 'list' (USB)")
     p.add_argument("--ble", nargs="?", const="scan", metavar="ADDR_OR_UID",
                    help="use Bluetooth; without a value: scan and pick")
-    p.add_argument("--serial", action="store_true", help="USB serial (not supported yet)")
+    p.add_argument("--serial", nargs="?", const="auto", metavar="PORT",
+                   help="use USB serial (COM port / ttyACM); without a value: find it")
     # the channel options also work after the command ("list --ble")
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("-i", "--index", type=int, default=argparse.SUPPRESS)
     common.add_argument("--ble", nargs="?", const="scan", default=argparse.SUPPRESS)
-    common.add_argument("--serial", action="store_true", default=argparse.SUPPRESS)
+    common.add_argument("--serial", nargs="?", const="auto", default=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="cmd", required=True)
     _add = sub.add_parser
     sub.add_parser = lambda *a, **kw: _add(*a, parents=[common], **kw)
