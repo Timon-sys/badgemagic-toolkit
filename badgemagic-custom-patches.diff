@@ -1361,10 +1361,10 @@ index 0b57333..b1a15ae 100644
  
      // similar to snake 
 diff --git a/src/power.c b/src/power.c
-index 5d2e5c2..9a3a0b5 100644
+index 5d2e5c2..965b1f7 100644
 --- a/src/power.c
 +++ b/src/power.c
-@@ -2,10 +2,27 @@
+@@ -2,10 +2,30 @@
  
  #include "power.h"
  #include "button.h"
@@ -1389,19 +1389,32 @@ index 5d2e5c2..9a3a0b5 100644
 +		DelayMs(10);
 +	DelayMs(100);   /* debounce the release */
 +
++	/* Read before the pins go floating below. */
++	int was_charging = charging_status();
++
  	// Stop wasting energy
  	GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_Floating);
  	GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_Floating);
-@@ -15,6 +32,8 @@ void poweroff()
+@@ -13,8 +33,16 @@ void poweroff()
+ 	// Configure wake-up
+ 	GPIOA_ModeCfg(KEY1_PIN, GPIO_ModeIN_PD);
  	GPIOA_ITModeCfg(KEY1_PIN, GPIO_ITMode_RiseEdge);
- 	GPIOA_ModeCfg(CHARGE_STT_PIN, GPIO_ModeIN_PU);
- 	GPIOA_ITModeCfg(CHARGE_STT_PIN, GPIO_ITMode_FallEdge);
+-	GPIOA_ModeCfg(CHARGE_STT_PIN, GPIO_ModeIN_PU);
+-	GPIOA_ITModeCfg(CHARGE_STT_PIN, GPIO_ITMode_FallEdge);
++	/* Charging starting (CHRG falls) wakes the badge, so plugging it in
++	 * switches it on. But switched off while already charging, it came
++	 * straight back up within a second: the charger's CHRG line gives a
++	 * falling edge once the load is gone. Then only the button wakes it. */
++	if (!was_charging) {
++		GPIOA_ModeCfg(CHARGE_STT_PIN, GPIO_ModeIN_PU);
++		GPIOA_ITModeCfg(CHARGE_STT_PIN, GPIO_ITMode_FallEdge);
++	}
 +	/* Drop any edge latched while the menu key was being released. */
 +	GPIOA_ClearITFlagBit(KEY1_PIN | CHARGE_STT_PIN);
  	PFIC_EnableIRQ(GPIO_A_IRQn);
  	PWR_PeriphWakeUpCfg(ENABLE, RB_SLP_GPIO_WAKE, Long_Delay);
  
-@@ -22,13 +41,17 @@ void poweroff()
+@@ -22,13 +50,17 @@ void poweroff()
  	LowPower_Shutdown(0);
  }
  
@@ -1420,7 +1433,7 @@ index 5d2e5c2..9a3a0b5 100644
  	PRINT("RoughCalib_Value = %d \n", adc_calib);
  
  	ADC_ChannelCfg(1);
-@@ -41,7 +64,7 @@ int batt_raw()
+@@ -41,7 +73,7 @@ int batt_raw()
  	PRINT("ADC reading: \n");
  	uint16_t buf[20];
  	for(int i = 0; i < 20; i++) {
@@ -1429,7 +1442,7 @@ index 5d2e5c2..9a3a0b5 100644
  		ret += adc;
  		PRINT("%d \n", adc);
  	}
-@@ -67,6 +90,15 @@ int charging_status()
+@@ -67,6 +99,15 @@ int charging_status()
  #define ADC2VOLT(raw)           ((raw) / ADC_MAX_VAL * ADC_MAX_VOLT)
  #define VOLT2ADC(volt)          ((volt) / ADC_MAX_VOLT * ADC_MAX_VAL)
  

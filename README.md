@@ -414,6 +414,13 @@ place than the factory one.
   length counters after a transfer, so a following upload could be misread.
 - **LEDs stuck on after switching off:** the LED timer kept running into
   power-off, leaving a column lit at full brightness. It is stopped first now.
+- **Switching off while charging didn't stick:** the badge came straight
+  back on within a second. "Charging started" is a wake-up source, so that
+  plugging in switches the badge on, and the charger signals it again once
+  the badge stops drawing power. Now that wake-up is only armed when the
+  badge isn't charging: switched off on battery, plugging in still switches
+  it on; switched off while charging, it stays off until you press the
+  button.
 - **Slots cycling on their own:** after the last slot, the button re-armed
   automatic cycling. Now it steps one slot per press and wraps around.
 - **Badge stuck in the menu after an upload,** behind a "BLUETOOTH OFF"
