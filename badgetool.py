@@ -807,9 +807,8 @@ clock          {s['time']}{'   <- not set' if s['time'].startswith('2020') else 
 battery        {s['batt_mv']/1000:.3f} V  raw {s['batt_raw']}  {'charging' if s['charging'] else 'on battery'}
 brightness     {s['brightness']} / 3
 bluetooth      name "{s['ble_name']}", always-on {'yes' if s['ble_always_on'] else 'no'}, PIN {'on' if s['ble_security'] else 'off'}
-startup anim   {'off' if s['splash_ms'] == 0 else str(s['splash_ms']) + ' ms/frame'}
-charging scr   {'(needs firmware 1.3.0)' if s['charging_screen_s'] is None else 'off, boots straight to the slots' if s['charging_screen_s'] == 0 else str(s['charging_screen_s']) + ' s at boot'}
-reset on rx    {'yes' if s['reset_after_upload'] else 'no'}""")
+startup anim   {'off' if s['splash_ms'] == 0 else 'on'}
+charging scr   {'(needs firmware 1.3.0)' if s['charging_screen_s'] is None else 'off, boots straight to the slots' if s['charging_screen_s'] == 0 else str(s['charging_screen_s']) + ' s at boot'}""")
 
 
 def cmd_battery(a):

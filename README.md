@@ -93,6 +93,14 @@ badge.
   connection open until you quit it).
 - It costs some battery even when nothing is connected; we haven't measured
   how much. Turn it off for long days on battery.
+- **Anyone in range can control the badge.** Bluetooth has no protection
+  for the `ng` commands: whoever is nearby can stream to it, change the
+  brightness, the name or the clock, reboot it or switch it off. The PIN
+  from the badge's SECURITY menu only guards uploads of new slots, and
+  `badgetool.py` can't send that PIN yet, so with security on, uploads over
+  Bluetooth fail (`GATT Protocol Error: Unlikely Error`). USB isn't
+  affected. If that matters to you, keep always-on off: then the badge is
+  only reachable while you're in the BT-PAIRING menu.
 - The Bluetooth name shows in scans; the app finds the badge by its service
   ID, so any name works with the app.
 
@@ -573,6 +581,10 @@ renaming a badge keeps it compatible with the app.
 
 ## Ideas / not done yet
 
+- **Bluetooth security:** let the PIN cover the `ng` commands too, so a
+  badge with security on can't be controlled by anyone in range, and teach
+  `badgetool.py` and the web panel to ask for the PIN. Today the PIN only
+  guards uploads (see [Always-on Bluetooth](#always-on-bluetooth)).
 - **Status and battery over BLE:** the replies currently go out over USB
   (HID and serial) only. Sending them as `f056` notifications would give BLE the full
   `status` (voltage, clock, settings) instead of just the battery percentage.
