@@ -27,8 +27,9 @@ Channel (default USB HID):
   --ble AA:BB:CC:DD:EE:FF   or a chip UID like 11-22-33-44-55-66-77-88
   --serial [PORT]       USB serial (COM port / ttyACM) instead of HID; without a
                         port the badge is found automatically (-i N picks one)
-Over BLE everything works except flash; status and battery show only the
-battery % + device info (no voltage, clock or settings yet).
+Over BLE everything works except flash and the PIN settings (security, pin,
+forget-bonds: USB only); status and battery show only the battery % + device
+info (no voltage, clock or settings yet).
 
 Badges it knows:
   custom  CH582 with our patched FOSSASIA firmware ("FOSSASIA WAS HERE")
@@ -491,9 +492,26 @@ class BleBadge:
 
     need_custom = Badge.need_custom
 
-    def _write(self, uuid, data):
+    # Windows drops a GATT operation now and then: "Not connected", or with a
+    # paired badge "operation canceled" (WinError -2147023673) while it sets
+    # up encryption. Both pass on a retry; a dropped link gets reconnected.
+    TRANSIENT = ("Not connected", "-2147023673", "abgebrochen", "canceled", "cancelled")
+
+    def _retry(self, op):
+        for attempt in range(3):
+            try:
+                return op()
+            except Exception as e:
+                if attempt == 2 or not any(k in str(e) for k in self.TRANSIENT):
+                    raise
+                time.sleep(1)
+                if not self.client.is_connected:
+                    self._run(self.client.connect())
+
+    def _write(self, uuid, data, retry=True):
+        op = lambda: self._run(self.client.write_gatt_char(uuid, data, response=True))
         try:
-            self._run(self.client.write_gatt_char(uuid, data, response=True))
+            return self._retry(op) if retry else op()
         except Exception as e:
             # ATT error 5 = insufficient authentication: security is on and
             # this PC hasn't paired with the badge (or paired with an old PIN)
@@ -503,19 +521,22 @@ class BleBadge:
                     f"{self.address}' once (after a PIN change: 'unpair' first)") from e
             raise
 
+    def _read(self, uuid):
+        return self._retry(lambda: self._run(self.client.read_gatt_char(uuid)))
+
     def ng(self, payload):
         # BLE carries the raw [cmd, args...] payload; the 'NG' len framing is USB-only
         self.need_custom()
         self._write(NG_WRITE, payload)
 
     def status(self):
-        s = {k: self._run(self.client.read_gatt_char(u)).split(b"\0")[0].decode(errors="replace")
+        s = {k: self._read(u).split(b"\0")[0].decode(errors="replace")
              for k, u in DEVINFO.items()}
         s["battery_pct"] = self.battery_pct()
         return s
 
     def battery_pct(self):
-        return self._run(self.client.read_gatt_char(BATT_LEVEL))[0]
+        return self._read(BATT_LEVEL)[0]
 
     def battery(self):
         raise RuntimeError("voltage over BLE not implemented yet (firmware TODO); "
@@ -528,8 +549,14 @@ class BleBadge:
     def upload_slots(self, slots):
         pkt = legacy_packet(slots, year_byte=time.localtime().tm_year & 0xFF)
         pkt += bytes(-len(pkt) % 16)
-        for i in range(0, len(pkt), 16):  # the legacy service takes 16-byte writes, like the app
-            self._write(LEGACY_WRITE, pkt[i:i + 16])
+
+        def send():
+            # the legacy service takes 16-byte writes, like the app. No retry of
+            # single packets (a doubled one would shift the data); on a hiccup the
+            # whole upload starts over, the header resets the badge's receiver.
+            for i in range(0, len(pkt), 16):
+                self._write(LEGACY_WRITE, pkt[i:i + 16], retry=False)
+        self._retry(send)
         if self.kind == "custom":
             # the firmware sets its clock from the header timestamp only when the
             # transfer completes, so a slow BLE upload leaves it that far behind
