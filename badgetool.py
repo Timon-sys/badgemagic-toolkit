@@ -11,6 +11,10 @@ Run without arguments for an interactive menu, or use a command:
   python badgetool.py name "My Badge"           Bluetooth name, max 20 chars (reboots)
   python badgetool.py splash on|off             startup animation
   python badgetool.py charging-screen 0-60      seconds it shows at boot, 0 = boot straight to the slots
+  python badgetool.py security on|off           on = Bluetooth devices must pair with the PIN (USB only)
+  python badgetool.py pin [123456|random]       show / set the pairing PIN (USB only)
+  python badgetool.py forget-bonds              remove every paired device (USB only)
+  python badgetool.py pair --ble                pair this PC with a badge (Windows); unpair undoes it
   python badgetool.py text "Hi" "Second slot"   one message per slot (USB or BLE)
   python badgetool.py upload config.toml        full badgemagic config file
   python badgetool.py image pic.png [--invert]  static image into slot 1 (dark = lit)
@@ -69,6 +73,7 @@ COLS, ROWS = 44, 11
 CMD_POWER, CMD_STREAM_SET, CMD_STREAM_BM, CMD_BLE = 1, 2, 3, 4
 CMD_SAVE, CMD_MISC = 6, 8
 MISC_SPLASH, MISC_BRIGHTNESS, MISC_TIME, MISC_BATTERY, MISC_STATUS, MISC_CHARGING = 0, 1, 2, 3, 4, 5
+MISC_SECURITY, MISC_PIN, MISC_FORGET_BONDS = 6, 7, 8  # firmware 1.4.0, USB only
 MODES = ["menu", "slots", "BT download", "clock", "game", "power off"]
 
 
@@ -333,6 +338,14 @@ class Badge:
         raw, mv = struct.unpack_from("<HH", r, 3)
         return raw, mv, bool(r[7])
 
+    def pin_info(self):
+        """(pin, security on, paired devices), None on firmware before 1.4.0."""
+        try:
+            r = self.ng_query(bytes([CMD_MISC, MISC_PIN]), b"PIN")
+        except RuntimeError:
+            return None
+        return struct.unpack_from("<I", r, 3)[0], bool(r[7]), r[8]
+
     def set_time(self, t=None):
         t = t or datetime.datetime.now()
         self.ng(bytes([CMD_MISC, MISC_TIME]) + struct.pack("<H", t.year)
@@ -451,8 +464,12 @@ class BleBadge:
             try:
                 self._run(self.client.connect())
                 break
-            except Exception:
+            except Exception as e:
                 if attempt == 2:
+                    if type(e).__name__ == "BleakDeviceNotFoundError":
+                        raise RuntimeError(
+                            f"{address} not found: switched off, out of range, or something else "
+                            "is connected to it (it takes one connection at a time)") from e
                     raise
                 print("  no luck, trying once more ...")
                 time.sleep(2)
@@ -474,10 +491,22 @@ class BleBadge:
 
     need_custom = Badge.need_custom
 
+    def _write(self, uuid, data):
+        try:
+            self._run(self.client.write_gatt_char(uuid, data, response=True))
+        except Exception as e:
+            # ATT error 5 = insufficient authentication: security is on and
+            # this PC hasn't paired with the badge (or paired with an old PIN)
+            if any(k in str(e) for k in ("rotection", "uthenticat", "0x05")):
+                raise RuntimeError(
+                    "the badge wants its pairing PIN: run 'badgetool.py pair --ble "
+                    f"{self.address}' once (after a PIN change: 'unpair' first)") from e
+            raise
+
     def ng(self, payload):
         # BLE carries the raw [cmd, args...] payload; the 'NG' len framing is USB-only
         self.need_custom()
-        self._run(self.client.write_gatt_char(NG_WRITE, payload, response=True))
+        self._write(NG_WRITE, payload)
 
     def status(self):
         s = {k: self._run(self.client.read_gatt_char(u)).split(b"\0")[0].decode(errors="replace")
@@ -500,7 +529,7 @@ class BleBadge:
         pkt = legacy_packet(slots, year_byte=time.localtime().tm_year & 0xFF)
         pkt += bytes(-len(pkt) % 16)
         for i in range(0, len(pkt), 16):  # the legacy service takes 16-byte writes, like the app
-            self._run(self.client.write_gatt_char(LEGACY_WRITE, pkt[i:i + 16], response=True))
+            self._write(LEGACY_WRITE, pkt[i:i + 16])
         if self.kind == "custom":
             # the firmware sets its clock from the header timestamp only when the
             # transfer completes, so a slow BLE upload leaves it that far behind
@@ -800,13 +829,19 @@ battery        {s['battery_pct']} %
         print("factory firmware cannot report anything back; text/image upload works")
         return
     s = b.status()
+    pin = b.pin_info()
     b.close()
+    if pin is None:
+        sec = f"PIN {'on' if s['ble_security'] else 'off'}"
+    else:
+        sec = (f"pairing PIN {pin[0]:06d} {'required' if pin[1] else 'off'}, "
+               f"{pin[2]} device{'' if pin[2] == 1 else 's'} paired")
     print(f"""firmware       {s['firmware']}
 mode           {'charging screen - press a button to finish booting (Bluetooth is off until then)' if s['charging_screen'] else s['mode']}{'  (streaming)' if s['streaming'] else ''}
 clock          {s['time']}{'   <- not set' if s['time'].startswith('2020') else ''}
 battery        {s['batt_mv']/1000:.3f} V  raw {s['batt_raw']}  {'charging' if s['charging'] else 'on battery'}
 brightness     {s['brightness']} / 3
-bluetooth      name "{s['ble_name']}", always-on {'yes' if s['ble_always_on'] else 'no'}, PIN {'on' if s['ble_security'] else 'off'}
+bluetooth      name "{s['ble_name']}", always-on {'yes' if s['ble_always_on'] else 'no'}, {sec}
 startup anim   {'off' if s['splash_ms'] == 0 else 'on'}
 charging scr   {'(needs firmware 1.3.0)' if s['charging_screen_s'] is None else 'off, boots straight to the slots' if s['charging_screen_s'] == 0 else str(s['charging_screen_s']) + ' s at boot'}""")
 
@@ -888,6 +923,157 @@ def cmd_charging(a):
     b.close()
     print("charging screen " + ("off: the badge boots straight to the slots"
                                 if a.seconds == 0 else f"{a.seconds} s at boot") + ", saved")
+
+
+def open_usb_pin(a):
+    """The PIN and the security switch only change over USB (firmware rule)."""
+    b = open_one(a)
+    if isinstance(b, BleBadge):
+        b.close()
+        sys.exit("the PIN and Bluetooth security can only be changed over USB")
+    if b.pin_info() is None:
+        b.close()
+        sys.exit("this needs the patched firmware 1.4.0 or later ('badgetool.py flash')")
+    return b
+
+
+def cmd_security(a):
+    b = open_usb_pin(a)
+    b.ng(bytes([CMD_MISC, MISC_SECURITY, 1 if a.state == "on" else 0]))
+    time.sleep(1.0)  # saved to flash right away
+    pin, on, _ = b.pin_info()
+    b.close()
+    if on:
+        print(f"Bluetooth security on, saved: devices must pair with PIN {pin:06d} "
+              "(Windows: 'badgetool.py pair --ble')")
+    else:
+        print("Bluetooth security off, saved: anyone in range can connect and send commands")
+
+
+def cmd_pin(a):
+    b = open_usb_pin(a)
+    if a.pin is None:
+        pin, on, n = b.pin_info()
+        b.close()
+        print(f"PIN {pin:06d}, security {'on' if on else 'off'}, "
+              f"{n} device{'' if n == 1 else 's'} paired")
+        return
+    if a.pin == "random":
+        import secrets
+        new = secrets.randbelow(1000000)
+    elif len(a.pin) == 6 and a.pin.isdigit():
+        new = int(a.pin)
+    else:
+        b.close()
+        sys.exit("the PIN has 6 digits (Bluetooth passkeys always do), or use 'random'")
+    b.ng(bytes([CMD_MISC, MISC_PIN]) + struct.pack("<I", new))
+    time.sleep(1.0)
+    pin, on, _ = b.pin_info()
+    b.close()
+    if pin != new:
+        sys.exit("the badge didn't take the new PIN")
+    print(f"PIN {pin:06d} saved; every pairing was removed, so devices pair again "
+          "(remove the old pairing on them first, Windows: 'badgetool.py unpair --ble')")
+    if not on:
+        print("note: security is off, so the PIN isn't asked for ('badgetool.py security on')")
+
+
+def cmd_forget(a):
+    b = open_usb_pin(a)
+    b.ng(bytes([CMD_MISC, MISC_FORGET_BONDS]))
+    time.sleep(1.0)
+    n = b.pin_info()[2]
+    b.close()
+    print(f"pairings removed ({n} left); remove the badge on those devices too")
+
+
+def pick_ble_address(a):
+    ble = getattr(a, "ble", None) or "scan"
+    if ble != "scan":
+        return ble_address(ble)
+    found = ble_scan()
+    if not found:
+        sys.exit("no badge found over Bluetooth (switched on? Bluetooth always-on or BT mode?)")
+    for i, (addr, name, rssi) in enumerate(found):
+        print(f"#{i}  {addr}  {name or '(no name)'}  {rssi} dBm")
+    pick = int(input("which one? ")) if len(found) > 1 else 0
+    return found[pick][0]
+
+
+def winrt_pairing(address):
+    if sys.platform != "win32":
+        sys.exit("pair/unpair is for Windows; on Linux: bluetoothctl, 'pair ADDR', "
+                 "then type the PIN")
+    from winrt.windows.devices.bluetooth import BluetoothLEDevice
+    dev = BluetoothLEDevice.from_bluetooth_address_async(int(address.replace(":", ""), 16))
+    return dev
+
+
+def winrt_is_paired(address):
+    async def run():
+        dev = await winrt_pairing(address)
+        if dev is None:
+            return False
+        try:
+            return dev.device_information.pairing.is_paired
+        finally:
+            dev.close()
+    return asyncio.run(run())
+
+
+def cmd_pair(a):
+    """Pair this PC with a badge that has security on. The badge asks for
+    pairing as soon as something connects, and Windows answers with its own
+    "Add device" notification, where you type the PIN. Typing it through
+    WinRT from here collided with that notification, so this connects to
+    bring it up and stays connected until Windows reports the pairing: if
+    the link is gone by the time you click, Windows says "connection error"."""
+    from bleak import BleakClient
+    address = pick_ble_address(a)
+    if winrt_is_paired(address):
+        print("already paired (after a PIN change: 'badgetool.py unpair' first)")
+        return
+
+    async def run():
+        async with BleakClient(address, timeout=15) as c:
+            print("Windows shows an 'Add device' notification for the badge now: click it and type\n"
+                  "the PIN ('badgetool.py pin' over USB shows it, the badge's BT-PAIRING menu too).\n"
+                  "Waiting up to 2 minutes ...")
+            for _ in range(60):
+                dev = await winrt_pairing(address)
+                try:
+                    if dev is not None and dev.device_information.pairing.is_paired:
+                        return True
+                finally:
+                    if dev is not None:
+                        dev.close()
+                if not c.is_connected:
+                    break
+                await asyncio.sleep(2)
+        return False
+    print(f"connecting to {address} ...")
+    if asyncio.run(run()):
+        print("paired; this PC can now use --ble with this badge")
+    else:
+        sys.exit("not paired; no notification? Settings > Bluetooth > Add device also works")
+
+
+def cmd_unpair(a):
+    address = pick_ble_address(a)
+
+    async def run():
+        dev = await winrt_pairing(address)
+        if dev is None:
+            raise RuntimeError(f"{address} not known to Windows")
+        try:
+            if not dev.device_information.pairing.is_paired:
+                return None
+            return (await dev.device_information.pairing.unpair_async()).status
+        finally:
+            dev.close()
+
+    status = asyncio.run(run())
+    print("not paired" if status is None else f"unpaired ({status})")
 
 
 def preview_blocks(data, width=None):
@@ -1218,6 +1404,13 @@ def main():
     s = sub.add_parser("splash"); s.add_argument("state", choices=["on", "off"]); s.set_defaults(f=cmd_splash)
     s = sub.add_parser("charging-screen", help="seconds the charging screen shows at boot, 0 = skip")
     s.add_argument("seconds", type=int, choices=range(61), metavar="0-60"); s.set_defaults(f=cmd_charging)
+    s = sub.add_parser("security", help="on = Bluetooth clients must pair with the PIN (USB only)")
+    s.add_argument("state", choices=["on", "off"]); s.set_defaults(f=cmd_security)
+    s = sub.add_parser("pin", help="show or set the 6-digit pairing PIN (USB only)")
+    s.add_argument("pin", nargs="?", metavar="NNNNNN|random"); s.set_defaults(f=cmd_pin)
+    sub.add_parser("forget-bonds", help="remove every device paired with the badge (USB only)").set_defaults(f=cmd_forget)
+    sub.add_parser("pair", help="pair this PC with a badge over Bluetooth (Windows)").set_defaults(f=cmd_pair)
+    sub.add_parser("unpair", help="remove this PC's pairing with a badge (Windows)").set_defaults(f=cmd_unpair)
     s = sub.add_parser("text"); s.add_argument("messages", nargs="+")
     s.add_argument("--mode", default="left",
                    choices=["left", "right", "up", "down", "center", "fast", "drop", "curtain", "laser"])

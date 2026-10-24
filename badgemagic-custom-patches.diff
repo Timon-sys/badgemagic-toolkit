@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index a360b59..af723bf 100644
+index a360b59..192458d 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -20,7 +20,11 @@ OPT = -Os
@@ -10,7 +10,7 @@ index a360b59..af723bf 100644
 +# badgemagic-toolkit: builds are named after the toolkit release. The name has
 +# to start with the upstream tag, because the USB serial-number string takes
 +# the first characters of VERSION up to the tag's length.
-+TOOLKIT_VERSION = 1.3.0
++TOOLKIT_VERSION = 1.4.0
 +VERSION = $(VERSION_ABBR)-toolkit-$(TOOLKIT_VERSION)
  VERSION_ABBR = $(shell git describe --abbrev=0 --tags 2>/dev/null || echo "unknown")
  ifeq ($(VERSION_ABBR),unknown)
@@ -125,10 +125,18 @@ index cf4bb79..c7add0e 100644
  	int frame = mod(bm->anim_step, frame_steps*frames)/frame_steps;
  	bm->anim_step++;
 diff --git a/src/ble/peripheral.c b/src/ble/peripheral.c
-index 7f657ae..6870b51 100644
+index 7f657ae..f61cf16 100644
 --- a/src/ble/peripheral.c
 +++ b/src/ble/peripheral.c
-@@ -59,6 +59,11 @@ static void processTMOSMsg(tmos_event_hdr_t *pMsg)
+@@ -2,6 +2,7 @@
+ #include "setup.h"
+ #include "../config.h"
+ #include "../legacyctrl.h"
++#include "../debug.h"
+ 
+ #define ADV_UUID    (0xFEE0)
+ 
+@@ -59,6 +60,15 @@ static void processTMOSMsg(tmos_event_hdr_t *pMsg)
  	}
  }
  
@@ -137,19 +145,59 @@ index 7f657ae..6870b51 100644
 + * the badge stayed visible until reboot even with ble_always_on off. */
 +static uint8_t adv_wanted;
 +
++/* Set from the BT-PAIRING menu: lets the current client in without pairing
++ * until it disconnects. */
++static uint8_t sec_bypass;
++
  static void enable_advertising(uint8_t enable)
  {
  	GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8), &enable);
-@@ -92,7 +97,7 @@ static void link_onTerminated(gapRoleEvent_t *pe)
+@@ -91,8 +101,8 @@ static void link_onTerminated(gapRoleEvent_t *pe)
+ {
  	gapTerminateLinkEvent_t *event = (gapTerminateLinkEvent_t *)pe;
  	GAPRole_TerminateLink(pe->linkCmpl.connectionHandle);
- 	legacy_reset_auth(); //clears authorised flag on disconnect
+-	legacy_reset_auth(); //clears authorised flag on disconnect
 -	enable_advertising(TRUE);
++	sec_bypass = 0;
 +	enable_advertising(adv_wanted);
  
  	if(event->connectionHandle == conn_list.connHandle) {
  		conn_list.connHandle = GAP_CONNHANDLE_INIT;
-@@ -178,12 +183,14 @@ static uint16 peripheral_task(uint8 task_id, uint16 events)
+@@ -154,9 +164,32 @@ static gapRolesBroadcasterCBs_t broadcast_handlers = {
+ 	NULL
+ };
+ 
++/* With IO caps "display only" the client types the PIN and we supply it.
++ * The badge has no way to show a fresh one per pairing, so it is always the
++ * one set over USB, like a Meshtastic node with a fixed PIN. */
++static void bond_onPasscode(uint8 *addr, uint16 connHandle,
++				uint8 uiInputs, uint8 uiOutputs)
++{
++	GAPBondMgr_PasscodeRsp(connHandle, SUCCESS, badge_cfg.ble_passkey);
++}
++
++static void reject_unauth_bond(uint16 connHandle);
++
++static void bond_onPairState(uint16 connHandle, uint8 state, uint8 status)
++{
++	PRINT("ble: pair state %d status %02x\n", state, status);
++	/* MITM protection is only what we ask for: a client can still pair
++	 * "Just Works" without the PIN. ble_link_allowed() refuses such links,
++	 * but the bond would take one of the few bond slots for nothing. */
++	if (state == GAPBOND_PAIRING_STATE_BOND_SAVED
++	    && !linkDB_State(connHandle, LINK_AUTHENTICATED))
++		reject_unauth_bond(connHandle);
++}
++
+ // GAP Bond Manager Callbacks
+ static gapBondCBs_t bond_managers = {
+-	NULL,
++	bond_onPasscode,
++	bond_onPairState,
+ 	NULL
+ };
+ 
+@@ -178,15 +211,144 @@ static uint16 peripheral_task(uint8 task_id, uint16 events)
  void ble_enable_advertise()
  {
  	uint8 e = TRUE;
@@ -164,11 +212,217 @@ index 7f657ae..6870b51 100644
  	GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8), &e);
  }
  
++/* Security on: the badge asks a client to pair as soon as it connects, with
++ * the PIN as passkey (MITM protected), and keeps the bond, so each device
++ * types the PIN once, like with a Meshtastic node. The profiles then refuse
++ * writes from links that aren't paired (ble_link_allowed()).
++ * Security off: nothing is asked for or needed, but a client that bonded
++ * earlier can still encrypt with its bond instead of failing to reconnect.
++ * Upstream had pairing switched off and a 4-digit code sent in clear text
++ * that only guarded slot uploads. Takes effect for the next connection. */
++void ble_apply_security()
++{
++	uint32 passkey = badge_cfg.ble_passkey;
++	uint8 pairMode = badge_cfg.ble_security ? GAPBOND_PAIRING_MODE_INITIATE
++	                                        : GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
++	uint8 on = TRUE;
++	uint8 sc = ble_sc_ok;
++	uint8 ioCap = GAPBOND_IO_CAP_DISPLAY_ONLY;
++	GAPBondMgr_SetParameter(GAPBOND_PERI_DEFAULT_PASSCODE, sizeof(uint32), &passkey);
++	GAPBondMgr_SetParameter(GAPBOND_PERI_PAIRING_MODE, sizeof(uint8), &pairMode);
++	GAPBondMgr_SetParameter(GAPBOND_PERI_MITM_PROTECTION, sizeof(uint8), &on);
++	GAPBondMgr_SetParameter(GAPBOND_PERI_IO_CAPABILITIES, sizeof(uint8), &ioCap);
++	GAPBondMgr_SetParameter(GAPBOND_PERI_BONDING_ENABLED, sizeof(uint8), &on);
++	GAPBondMgr_SetParameter(GAPBOND_PERI_SC_PROTECTION, sizeof(uint8), &sc);
++}
++
++static void drop_link()
++{
++	if (conn_list.connHandle != GAP_CONNHANDLE_INIT)
++		GAPRole_TerminateLink(conn_list.connHandle);
++}
++
++/* The USB commands below run in the USB ISR, where the BLE lib must not be
++ * called, so they only flag the work for this task. */
++static uint8 sec_taskid = INVALID_TASK_ID;
++#define SEC_UPDATE_EVT 0x0001
++static volatile uint8_t sec_forget;
++static volatile uint8_t sec_changed;
++
++/* address type + address of a peer whose bond has to go */
++static uint8 unauth_peer[1 + B_ADDR_LEN];
++static uint8_t unauth_pending;
++static uint16 unauth_handle;
++
++static void find_unauth_peer(linkDBItem_t *it)
++{
++	if (it->connectionHandle != unauth_handle)
++		return;
++	unauth_peer[0] = it->addrType;
++	tmos_memcpy(&unauth_peer[1], it->addr, B_ADDR_LEN);
++	unauth_pending = 1;
++}
++
++/* Erasing from inside the bond manager's own callback isn't safe, so
++ * note the peer and let the task do it. */
++static void reject_unauth_bond(uint16 connHandle)
++{
++	unauth_handle = connHandle;
++	linkDB_PerformFunc(find_unauth_peer);
++	tmos_set_event(sec_taskid, SEC_UPDATE_EVT);
++}
++
++static uint16 security_task(uint8 task_id, uint16 events)
++{
++	if (events & SEC_UPDATE_EVT) {
++		if (unauth_pending) {
++			unauth_pending = 0;
++			GAPBondMgr_SetParameter(GAPBOND_ERASE_SINGLEBOND,
++						sizeof(unauth_peer), unauth_peer);
++			drop_link();
++		}
++		if (sec_forget) {
++			sec_forget = 0;
++			GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
++			drop_link();
++		}
++		ble_apply_security();
++		/* A client connected without pairing (or paired with the old PIN)
++		 * has to pair again. */
++		if (badge_cfg.ble_security)
++			drop_link();
++		if (sec_changed) {
++			sec_changed = 0;
++			bt_pairing_refresh();
++		}
++		return events ^ SEC_UPDATE_EVT;
++	}
++	return 0;
++}
++
++/* After ble_security or ble_passkey changed */
++void ble_security_changed()
++{
++	sec_changed = 1;
++	tmos_set_event(sec_taskid, SEC_UPDATE_EVT);
++}
++
++int ble_link_allowed(uint16_t connHandle)
++{
++	if (!badge_cfg.ble_security || sec_bypass)
++		return 1;
++	return linkDB_State(connHandle, LINK_ENCRYPTED)
++	       && linkDB_State(connHandle, LINK_AUTHENTICATED);
++}
++
++void ble_security_bypass()
++{
++	sec_bypass = 1;
++}
++
++void ble_security_bypass_end()
++{
++	sec_bypass = 0;
++}
++
++/* Erases every bond and drops the current client */
++void ble_forget_bonds()
++{
++	sec_forget = 1;
++	tmos_set_event(sec_taskid, SEC_UPDATE_EVT);
++}
++
++uint8_t ble_bond_count()
++{
++	uint8 n = 0;
++	GAPBondMgr_GetParameter(GAPBOND_BOND_COUNT, &n);
++	return n;
++}
++
+ // len should not exceed 20 chars excluding null-terminate char. Otherwise it
+ // will be trimmed off and return -1
+ static int setup_scan_rsp(char *name, uint8_t len)
+@@ -242,16 +404,7 @@ static void gap_init()
+ 	GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, MIN_ADV_INTERVAL);
+ 	GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, MAX_ADV_INTERVAL);
+ 
+-	static uint32 passkey = 0; // passkey "000000"
+-	static uint8  pairMode = GAPBOND_PAIRING_MODE_NO_PAIRING;
+-	static uint8  mitm = FALSE;
+-	static uint8  bonding = FALSE;
+-	static uint8  ioCap = GAPBOND_IO_CAP_DISPLAY_ONLY;
+-	GAPBondMgr_SetParameter(GAPBOND_PERI_DEFAULT_PASSCODE, sizeof(uint32), &passkey);
+-	GAPBondMgr_SetParameter(GAPBOND_PERI_PAIRING_MODE, sizeof(uint8), &pairMode);
+-	GAPBondMgr_SetParameter(GAPBOND_PERI_MITM_PROTECTION, sizeof(uint8), &mitm);
+-	GAPBondMgr_SetParameter(GAPBOND_PERI_IO_CAPABILITIES, sizeof(uint8), &ioCap);
+-	GAPBondMgr_SetParameter(GAPBOND_PERI_BONDING_ENABLED, sizeof(uint8), &bonding);
++	ble_apply_security();
+ 
+ 	GAPRole_BroadcasterSetCB(&broadcast_handlers);
+ 
+@@ -262,6 +415,7 @@ static void gap_init()
+ void peripheral_init()
+ {
+ 	taskid = TMOS_ProcessEventRegister(peripheral_task);
++	sec_taskid = TMOS_ProcessEventRegister(security_task);
+ 
+ 	initConn(&conn_list);
+ 	gap_init();
+diff --git a/src/ble/profile/legacy.c b/src/ble/profile/legacy.c
+index 2c127a8..ab0b6ad 100644
+--- a/src/ble/profile/legacy.c
++++ b/src/ble/profile/legacy.c
+@@ -1,6 +1,7 @@
+ #include "utils.h"
+ 
+ #include "../../legacyctrl.h"
++#include "../setup.h"
+ 
+ static const uint16_t ServiceUUID = 0xFEE0;
+ static const gattAttrType_t service = {2, (uint8_t *)&ServiceUUID};
+@@ -22,6 +23,9 @@ static bStatus_t write_handler(uint16 connHandle, gattAttribute_t *pAttr,
+ 	if(gattPermitAuthorWrite(pAttr->permissions)) {
+ 		return ATT_ERR_INSUFFICIENT_AUTHOR;
+ 	}
++	if (!ble_link_allowed(connHandle)) {
++		return ATT_ERR_INSUFFICIENT_AUTHEN;
++	}
+ 
+ 	uint16_t uuid = BUILD_UINT16(pAttr->type.uuid[0], pAttr->type.uuid[1]);
+ 	if(uuid == RxCharUUID) {
 diff --git a/src/ble/profile/ng.c b/src/ble/profile/ng.c
-index 7ab96ce..1c4789e 100644
+index 7ab96ce..4421eb2 100644
 --- a/src/ble/profile/ng.c
 +++ b/src/ble/profile/ng.c
-@@ -149,8 +149,12 @@ bStatus_t ng_notify(uint8_t *val, uint8_t len)
+@@ -5,6 +5,7 @@
+ #include "../../power.h"
+ #include "../../ngctrl.h"
+ #include "../../debug.h"
++#include "../setup.h"
+ 
+ static const uint16_t ServiceUUID = 0xF055;
+ static const gattAttrType_t service = {2, (uint8_t *)&ServiceUUID};
+@@ -41,6 +42,9 @@ static bStatus_t write_handler(uint16 connHandle, gattAttribute_t *pAttr,
+ 	if (!gattPermitWrite(pAttr->permissions)) {
+ 		return ATT_ERR_WRITE_NOT_PERMITTED;
+ 	}
++	if (!ble_link_allowed(connHandle)) {
++		return ATT_ERR_INSUFFICIENT_AUTHEN;
++	}
+ 	
+ 	uint16_t uuid = BUILD_UINT16(pAttr->type.uuid[0], pAttr->type.uuid[1]);
+ 	if(uuid == GATT_CLIENT_CHAR_CFG_UUID) {
+@@ -64,6 +68,9 @@ static bStatus_t read_handler(uint16_t connHandle, gattAttribute_t *pAttr,
+ 	if (!gattPermitRead(pAttr->permissions)) {
+ 		return ATT_ERR_READ_NOT_PERMITTED;
+ 	}
++	if (!ble_link_allowed(connHandle)) {
++		return ATT_ERR_INSUFFICIENT_AUTHEN;
++	}
+ 
+ 	uint16_t uuid = BUILD_UINT16(pAttr->type.uuid[0], pAttr->type.uuid[1]);
+ 	if(uuid == GATT_CLIENT_CHAR_CFG_UUID) {
+@@ -149,8 +156,12 @@ bStatus_t ng_notify(uint8_t *val, uint8_t len)
  	tmos_memcpy(noti.pValue, val, len);
  
  	bStatus_t ret = GATT_Notification(TxCCCD->connHandle, &noti, FALSE);
@@ -183,10 +437,15 @@ index 7ab96ce..1c4789e 100644
  		return ret;
  	}
 diff --git a/src/ble/setup.c b/src/ble/setup.c
-index 5687d5b..d4cd66a 100644
+index 5687d5b..d733e50 100644
 --- a/src/ble/setup.c
 +++ b/src/ble/setup.c
-@@ -6,7 +6,10 @@
+@@ -2,11 +2,15 @@
+ #include <stdlib.h>
+ 
+ #include "setup.h"
++#include "../leddrv.h"
+ #include "CH58xBLE_LIB.h"
  #include "CH58x_common.h"
  
  #ifndef BLE_BUFF_LEN
@@ -198,7 +457,53 @@ index 5687d5b..d4cd66a 100644
  #define BLE_BUFF_LEN (64 + 4)
  #endif
  
-@@ -54,7 +57,14 @@ void tmos_clockInit(void)
+@@ -37,9 +41,45 @@
+ #define PERIPHERAL_MAX_CONNECTION           1
+ #endif
+ 
++/* Bonds (pairing keys) live right below the config (0x7C00..0x7DFF); the
++ * slots grow from 0 and are far smaller, they have to fit in RAM first.
++ * One block per bonded device, two devices (say a PC and a phone): with a
++ * single block, pairing the phone pushed out the PC. A third device makes
++ * the stack erase all bonds. Upstream left SNVAddr at 0, nothing was kept. */
++#define BLE_SNV_NUM                         2
++#define BLE_SNV_BLOCK                       (EEPROM_PAGE_SIZE)
++#define BLE_SNV_ADDR                        (0x7C00 - BLE_SNV_BLOCK * BLE_SNV_NUM)
++
++/* LE Secure Connections needs BufMaxLen > 69 (see bleConfig_t), so the
++ * builds with the 68-byte buffer fall back to legacy passkey pairing. */
++const uint8_t ble_sc_ok = BLE_BUFF_LEN > 69;
++
+ static __attribute__((aligned(4), section(".noinit")))
+ uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
+ 
++static uint32_t snv_read(uint32_t addr, uint32_t num, uint32_t *buf)
++{
++	EEPROM_READ(addr, buf, num * 4);
++	return 0;
++}
++
++/* WCH's sample erases two pages from addr whatever it writes, which could
++ * reach the config, so erase just the pages being written (other bonds
++ * sit in the other blocks). */
++static uint32_t snv_write(uint32_t addr, uint32_t num, uint32_t *buf)
++{
++	if (addr < BLE_SNV_ADDR || addr + num * 4 > BLE_SNV_ADDR + BLE_SNV_BLOCK * BLE_SNV_NUM)
++		return 1;
++	uint32_t start = addr / EEPROM_PAGE_SIZE * EEPROM_PAGE_SIZE;
++	uint32_t end = (addr + num * 4 + EEPROM_PAGE_SIZE - 1) / EEPROM_PAGE_SIZE * EEPROM_PAGE_SIZE;
++	leds_pause();
++	uint32_t r = EEPROM_ERASE(start, end - start);
++	if (!r)
++		r = EEPROM_WRITE(addr, buf, num * 4);
++	leds_resume();
++	return r;
++}
++
+ static void lsi_calib(void)
+ {
+ 	Calibration_LSI(Level_128);
+@@ -54,7 +94,14 @@ void tmos_clockInit(void)
  	sys_safe_access_disable();
  	lsi_calib();
  
@@ -214,8 +519,52 @@ index 5687d5b..d4cd66a 100644
  	TMOS_TimerInit(0);
  }
  
+@@ -75,6 +122,12 @@ void ble_hardwareInit(void)
+ 
+ 	cfg.rcCB = lsi_calib;
+ 
++	cfg.SNVAddr = BLE_SNV_ADDR;
++	cfg.SNVBlock = BLE_SNV_BLOCK;
++	cfg.SNVNum = BLE_SNV_NUM;
++	cfg.readFlashCB = snv_read;
++	cfg.writeFlashCB = snv_write;
++
+ 	uint8_t m[6];
+ 	GetMACAddress(m);
+ 	memcpy(cfg.MacAddr, m, 6);
+diff --git a/src/ble/setup.h b/src/ble/setup.h
+index b814b36..0f87448 100644
+--- a/src/ble/setup.h
++++ b/src/ble/setup.h
+@@ -1,6 +1,8 @@
+ #ifndef __BLE_SETUP_H__
+ #define __BLE_SETUP_H__
+ 
++#include <stdint.h>
++
+ void tmos_clockInit(void);
+ void ble_hardwareInit(void);
+ void peripheral_init(void);
+@@ -8,4 +10,17 @@ void peripheral_init(void);
+ void ble_enable_advertise();
+ void ble_disable_advertise();
+ 
++/* Pairing PIN (see badge_cfg.ble_security / ble_passkey) */
++extern const uint8_t ble_sc_ok;
++void ble_apply_security();
++void ble_security_changed();
++int ble_link_allowed(uint16_t connHandle);
++void ble_security_bypass();
++void ble_security_bypass_end();
++void ble_forget_bonds();
++uint8_t ble_bond_count();
++
++/* in main.c: redraws BT-PAIRING after the PIN or security changed */
++void bt_pairing_refresh();
++
+ #endif /* __BLE_SETUP_H__ */
 diff --git a/src/config.c b/src/config.c
-index 82b0650..0ff5bf1 100644
+index 82b0650..2a66595 100644
 --- a/src/config.c
 +++ b/src/config.c
 @@ -3,6 +3,7 @@
@@ -272,11 +621,12 @@ index 82b0650..0ff5bf1 100644
  
  	int splash_size = ALIGN_1BYTE(splash.w) * splash.h;
  	memcpy(badge_cfg.splash_bm_bits, splash.bits, splash_size);
-@@ -37,11 +58,12 @@ void cfg_fallback()
+@@ -37,11 +58,13 @@ void cfg_fallback()
  
  	badge_cfg.reset_rx = FALSE;
  	badge_cfg.ble_security = 0;  // insecure by default
 +	badge_cfg.charging_screen_s = 5;
++	badge_cfg.ble_passkey = BLE_PASSKEY_DEFAULT;
  }
  
  void cfg_update_crc(badge_cfg_t *cfg)
@@ -286,7 +636,7 @@ index 82b0650..0ff5bf1 100644
  	PRINT(__func__);
  	PRINT(": crc: %02X\n", cfg->crc);
  }
-@@ -51,17 +73,24 @@ int cfg_writeflash(uint16_t flash_offs, badge_cfg_t *cfg)
+@@ -51,17 +74,24 @@ int cfg_writeflash(uint16_t flash_offs, badge_cfg_t *cfg)
  	if (flash_offs + CFG_SIZE > EEPROM_MAX_SIZE) {
  		return -1;
  	}
@@ -315,24 +665,28 @@ index 82b0650..0ff5bf1 100644
  }
  
  int cfg_readflash_def(badge_cfg_t *cfg)
-@@ -74,10 +103,29 @@ int cfg_writeflash_def(badge_cfg_t *cfg)
+@@ -74,10 +104,37 @@ int cfg_writeflash_def(badge_cfg_t *cfg)
  	return cfg_writeflash(CFG_DEF_FLASH_OFFS, cfg);
  }
  
-+/* Configs saved before charging_screen_s existed are one byte shorter, so
-+ * their CRC sits where the new field is now. Take them over instead of
-+ * falling back to defaults, which would lose the name and every setting. */
-+#define CFG_SIZE_NO_CHARGING (CFG_SIZE - 1)
++/* Older configs are shorter: fields only ever get appended before the CRC,
++ * so an old config is a prefix of the new one with its CRC where the first
++ * new field is now. Take them over instead of falling back to defaults,
++ * which would lose the name and every setting. */
++#define CFG_SIZE_NO_PASSKEY  (CFG_SIZE - 4)	/* firmware 1.3.0 */
++#define CFG_SIZE_NO_CHARGING (CFG_SIZE - 5)	/* before 1.3.0 */
 +
-+static int cfg_read_no_charging(badge_cfg_t *cfg)
++static int cfg_read_old(badge_cfg_t *cfg, int size)
 +{
-+	int ret = EEPROM_READ(CFG_DEF_FLASH_OFFS, cfg_buf, CFG_SIZE_NO_CHARGING);
++	int ret = EEPROM_READ(CFG_DEF_FLASH_OFFS, cfg_buf, size);
 +	if (ret)
 +		return ret;
-+	if (cfg_crc((uint8_t *)cfg_buf, CFG_SIZE_NO_CHARGING))
++	if (cfg_crc((uint8_t *)cfg_buf, size))
 +		return -1;
-+	memcpy(cfg, cfg_buf, CFG_SIZE_NO_CHARGING - 1);	/* without its CRC */
-+	cfg->charging_screen_s = 5;
++	memcpy(cfg, cfg_buf, size - 1);	/* without its CRC */
++	if (size <= CFG_SIZE_NO_CHARGING)
++		cfg->charging_screen_s = 5;
++	cfg->ble_passkey = BLE_PASSKEY_DEFAULT;
 +	return 0;
 +}
 +
@@ -340,20 +694,44 @@ index 82b0650..0ff5bf1 100644
  {
  	badge_cfg_t cfg;
  	int r = cfg_readflash_def(&cfg);
-+	if (r && cfg_read_no_charging(&cfg) == 0)
++	if (r && cfg_read_old(&cfg, CFG_SIZE_NO_PASSKEY) == 0)
 +		r = 0;
++	if (r && cfg_read_old(&cfg, CFG_SIZE_NO_CHARGING) == 0)
++		r = 0;
++	if (cfg.ble_passkey > BLE_PASSKEY_MAX)
++		cfg.ble_passkey = BLE_PASSKEY_DEFAULT;
  	if (r) {
  		cfg_fallback();
  		PRINT("configuration falling back: %02x\n", r);
+@@ -85,4 +142,4 @@ void cfg_init()
+ 		memcpy(&badge_cfg, &cfg, CFG_SIZE);
+ 		PRINT("configuration read from flash successfully\n");
+ 	}
+-}
+\ No newline at end of file
++}
 diff --git a/src/config.h b/src/config.h
-index 768fbe5..ec9342c 100644
+index 768fbe5..0973033 100644
 --- a/src/config.h
 +++ b/src/config.h
-@@ -29,6 +29,7 @@ typedef struct {
+@@ -12,6 +12,9 @@
+ #define SPLASH_MAX_HEIGHT (44) // pixels
+ #define SPLASH_MAX_SIZE (ALIGN_1BYTE(SPLASH_MAX_WIDTH) * SPLASH_MAX_HEIGHT)
+ 
++#define BLE_PASSKEY_DEFAULT (123456)
++#define BLE_PASSKEY_MAX     (999999)
++
+ typedef struct {
+ 	// Turn on Bluetooth while in Normal mode and disable Downloads mode
+ 	uint8_t ble_always_on;
+@@ -28,7 +31,9 @@ typedef struct {
+ 	// Speed in period of micro second. The lower value, the higher speed
  	uint16_t splash_speedT;
  	uint8_t reset_rx; // Reset after bitmap received
- 	uint8_t ble_security;  // 1 = require PIN for BLE transfers, 0 = open
+-	uint8_t ble_security;  // 1 = require PIN for BLE transfers, 0 = open
++	uint8_t ble_security;  // 1 = BLE clients must pair with ble_passkey, 0 = open
 +	uint8_t charging_screen_s; // boot charging screen in seconds, 0 = skip it
++	uint32_t ble_passkey;  // 6-digit BLE pairing PIN, 0..999999
  
  	uint8_t crc;
  } __attribute__((packed)) badge_cfg_t;
@@ -498,29 +876,86 @@ index 2e03c8d..193fb24 100644
  void led_write2row_raw(int row, int which_half, uint32_t val);
  
 diff --git a/src/legacyctrl.c b/src/legacyctrl.c
-index bc0a725..f13afea 100644
+index bc0a725..b705d95 100644
 --- a/src/legacyctrl.c
 +++ b/src/legacyctrl.c
-@@ -3,6 +3,7 @@
- #include "leddrv.h"
- #include "debug.h"
- #include "legacyctrl.h"
-+#include "config.h"
+@@ -6,20 +6,6 @@
  #include "CH58x_common.h"
  #include "usb/usb.h"
  
-@@ -33,7 +34,9 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
+-static uint16_t auth_code = 0;
+-static uint8_t  authorized = 0;
+-
+-void legacy_set_auth_code(uint16_t code)
+-{
+-	auth_code  = code;
+-	authorized = 0;
+-}
+-
+-void legacy_reset_auth()
+-{
+-	authorized = 0;
+-}
+-
+ int legacy_ble_rx(uint8_t *val, uint16_t len)
+ {
+ 	_TRACE();
+@@ -33,46 +19,15 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
  		return -1;
  	}
  
 -	if (!authorized) {
-+	/* Upstream checked this unconditionally, so with SECURITY off nothing
-+	 * ever set `authorized` and every upload was rejected (#190). */
-+	if (badge_cfg.ble_security && !authorized) {
- 		if (!memcmp(val, "wang", 4)) {
- 			char buf[32];
- 			int blen = snprintf(buf, sizeof(buf), "BLE: rejected - not authed\n");
-@@ -143,9 +146,17 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
+-		if (!memcmp(val, "wang", 4)) {
+-			char buf[32];
+-			int blen = snprintf(buf, sizeof(buf), "BLE: rejected - not authed\n");
+-			cdc_tx_poll((uint8_t *)buf, blen, 10);
+-			return -4;
+-		}
+-
+-		if (len >= 4
+-			&& val[0] >= '0' && val[0] <= '9'
+-			&& val[1] >= '0' && val[1] <= '9'
+-			&& val[2] >= '0' && val[2] <= '9'
+-			&& val[3] >= '0' && val[3] <= '9')
+-		{
+-			uint16_t attempt = (val[0] - '0') * 1000
+-			                 + (val[1] - '0') * 100
+-			                 + (val[2] - '0') * 10
+-			                 + (val[3] - '0');
+-
+-			if (attempt == auth_code) {
+-				authorized = 1;
+-				char buf[32];
+-				int blen = snprintf(buf, sizeof(buf), "BLE: auth OK\n");
+-				cdc_tx_poll((uint8_t *)buf, blen, 10);
+-				return 0;
+-			} else {
+-				char buf[48];
+-				int blen = snprintf(buf, sizeof(buf), "BLE: wrong code got=%04d exp=%04d\n", attempt, auth_code);
+-				cdc_tx_poll((uint8_t *)buf, blen, 10);
+-				return -5;
+-			}
+-		}
+-
+-		char buf[32];
+-		int blen = snprintf(buf, sizeof(buf), "BLE: invalid code attempt\n");
+-		cdc_tx_poll((uint8_t *)buf, blen, 10);
+-		return -5;
+-	}
++	/* The PIN is BLE pairing now (see ble_apply_security()), checked before
++	 * we get here. Apps written for upstream's 4-digit code still send it
++	 * ahead of the header: skip it instead of failing the upload. */
++	if (!data && memcmp(val, "wang", 4)
++	    && val[0] >= '0' && val[0] <= '9' && val[1] >= '0' && val[1] <= '9'
++	    && val[2] >= '0' && val[2] <= '9' && val[3] >= '0' && val[3] <= '9')
++		return 0;
+ 
+-	// Authorized path — log transfer progress over CDC
++	// log transfer progress over CDC
+ 	{
+ 		char buf[48];
+ 		int blen = snprintf(buf, sizeof(buf), "BLE: rx packet c=%d len=%d\n", c, len);
+@@ -143,9 +98,17 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
  	return 0;
  }
  
@@ -539,7 +974,7 @@ index bc0a725..f13afea 100644
  	static uint8_t *data;
  
  	PRINT("dump first 8 bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-@@ -174,6 +185,9 @@ int legacy_usb_rx(uint8_t *buf, uint16_t len)
+@@ -174,12 +137,10 @@ int legacy_usb_rx(uint8_t *buf, uint16_t len)
  	if ((rx_len > LEGACY_HEADER_SIZE) && rx_len >= data_len) {
  		data_flatSave(data, data_len);
  		free(data);
@@ -549,20 +984,31 @@ index bc0a725..f13afea 100644
  		handle_after_rx();
  	}
  	return 0;
+-}
+-
+-void legacy_bypass_auth()
+-{
+-    authorized = 1;   // skip auth entirely if KEY4 is pressed
+ }
+\ No newline at end of file
 diff --git a/src/legacyctrl.h b/src/legacyctrl.h
-index ca7d0c6..4b90829 100644
+index ca7d0c6..0e10031 100644
 --- a/src/legacyctrl.h
 +++ b/src/legacyctrl.h
-@@ -6,6 +6,7 @@
+@@ -6,9 +6,6 @@
  void handle_after_rx();
  int legacy_ble_rx(uint8_t *val, uint16_t len);
  int legacy_usb_rx(uint8_t *buf, uint16_t len);
+-
+-void legacy_set_auth_code(uint16_t code);  // called from main.c on BT-PAIRING entry
+-void legacy_reset_auth();                   // called from peripheral.c on disconnect
+-void legacy_bypass_auth();
 +int legacy_usb_busy();
  
- void legacy_set_auth_code(uint16_t code);  // called from main.c on BT-PAIRING entry
- void legacy_reset_auth();                   // called from peripheral.c on disconnect
+ #endif /* __LEGACYCTRL_H__ */
+\ No newline at end of file
 diff --git a/src/main.c b/src/main.c
-index 7b4b3c6..d23ee1b 100644
+index 7b4b3c6..17dd2b7 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -26,6 +26,7 @@
@@ -640,7 +1086,7 @@ index 7b4b3c6..d23ee1b 100644
  }
  void play_splash(xbm_t *xbm, int col, int row, int spT)
  {
-@@ -235,20 +255,26 @@ static uint16_t common_tasks(tmosTaskID task_id, uint16_t events)
+@@ -235,20 +255,29 @@ static uint16_t common_tasks(tmosTaskID task_id, uint16_t events)
  	}
  	
  	if (events & CLOCK_TICK) {
@@ -665,15 +1111,18 @@ index 7b4b3c6..d23ee1b 100644
 -		return events ^ BLE_OFF_DONE;
 +	/* Leaving BT-PAIRING (upload done or back to the menu) must stop
 +	 * advertising again unless ble_always_on is set. Deferred to here because
-+	 * handle_after_rx() can run in the USB ISR. An open link is kept. */
++	 * handle_after_rx() can run in the USB ISR. An open link is kept, but a
++	 * PIN bypass ends with the menu, or the next client anywhere got it. */
 +	if (events & BLE_ADV_UPDATE) {
++		if (mode != DOWNLOAD)
++			ble_security_bypass_end();
 +		if (!badge_cfg.ble_always_on && mode != DOWNLOAD)
 +			ble_disable_advertise();
 +		return events ^ BLE_ADV_UPDATE;
  	}
  
  	return 0;
-@@ -261,14 +287,20 @@ void ble_setup()
+@@ -261,14 +290,20 @@ void ble_setup()
  
  	peripheral_init();
  
@@ -698,7 +1147,7 @@ index 7b4b3c6..d23ee1b 100644
  }
  
  static void spawn_tasks()
-@@ -287,7 +319,7 @@ static void start_ble_animation()
+@@ -287,7 +322,7 @@ static void start_ble_animation()
  	tmos_stop_task(common_taskid, ANI_NEXT_STEP);
  	tmos_stop_task(common_taskid, ANI_MARQUE);
  	tmos_stop_task(common_taskid, ANI_FLASH);
@@ -707,7 +1156,7 @@ index 7b4b3c6..d23ee1b 100644
  
  	tmos_start_reload_task(common_taskid, BLE_NEXT_STEP, 500000 / 625);
  }
-@@ -302,7 +334,10 @@ static void start_normal_animation()
+@@ -302,7 +337,10 @@ static void start_normal_animation()
  
  static void resume_from_streaming()
  {
@@ -719,7 +1168,7 @@ index 7b4b3c6..d23ee1b 100644
  		start_normal_animation();
  	} else {
  		start_ble_animation();
-@@ -315,10 +350,10 @@ static void stop_all_animation()
+@@ -315,10 +353,10 @@ static void stop_all_animation()
  	tmos_stop_task(common_taskid, ANI_MARQUE);
  	tmos_stop_task(common_taskid, ANI_FLASH);
  	tmos_stop_task(common_taskid, BLE_NEXT_STEP);
@@ -732,7 +1181,7 @@ index 7b4b3c6..d23ee1b 100644
  
  uint8_t streaming_setting(uint8_t *params, uint16_t len)
  {
-@@ -326,8 +361,18 @@ uint8_t streaming_setting(uint8_t *params, uint16_t len)
+@@ -326,8 +364,18 @@ uint8_t streaming_setting(uint8_t *params, uint16_t len)
  		stop_all_animation();
  		streaming_enabled = 1;
  	} else if (params[0] == 0x01) { // return to normal mode
@@ -752,16 +1201,33 @@ index 7b4b3c6..d23ee1b 100644
  	}
  	return 0;
  }
-@@ -402,7 +447,7 @@ static void fb_puts_small(char *s, int len, int col, int row)
+@@ -400,23 +448,24 @@ static void fb_puts_small(char *s, int len, int col, int row)
+     }
+ }
  
- static void disp_auth_code(uint16_t code)
+-static void disp_auth_code(uint16_t code)
++/* The pairing PIN, so whoever holds the badge can pair a new device */
++static void disp_passkey(uint32_t code)
  {
 -	memset(fb, 0, sizeof(fb));
+-	char buf[5];
+-	buf[0] = '0' + (code / 1000) % 10;
+-	buf[1] = '0' + (code / 100)  % 10;
+-	buf[2] = '0' + (code / 10)   % 10;
+-	buf[3] = '0' + (code)        % 10;
+-	buf[4] = '\0';
+-	fb_puts(buf, 4, 8, 2);   // centered on 44-col display, row 2
 +	fb_clear();
- 	char buf[5];
- 	buf[0] = '0' + (code / 1000) % 10;
- 	buf[1] = '0' + (code / 100)  % 10;
-@@ -416,7 +461,7 @@ static void disp_clock()
++	char buf[7];
++	for (int i = 5; i >= 0; i--) {
++		buf[i] = '0' + code % 10;
++		code /= 10;
++	}
++	buf[6] = '\0';
++	fb_puts(buf, 6, 4, 2);   // 6 x 6 cols, centered on 44 cols, row 2
+ }
+ 
+ static void disp_clock()
  {
      uint16_t year, month, day, hour, minute, second;
      RTC_GetTime(&year, &month, &day, &hour, &minute, &second);
@@ -770,7 +1236,7 @@ index 7b4b3c6..d23ee1b 100644
  
      char buf[6];
      buf[0] = '0' + hour / 10;
-@@ -431,7 +476,7 @@ static void disp_clock()
+@@ -431,7 +480,7 @@ static void disp_clock()
  
  static void disp_menu()
  {
@@ -779,17 +1245,82 @@ index 7b4b3c6..d23ee1b 100644
  
      int page = menu_cursor / 2;
      int item0 = page * 2;
-@@ -474,6 +519,9 @@ static void menu_select(){
+@@ -464,6 +513,43 @@ static void menu_down(){
+ 	disp_menu();
+ }
+ 
++static void enter_bt_pairing()
++{
++	mode = DOWNLOAD;
++	ble_security_bypass_end();
++	/* KEY1 short press used to stay on menu_up, which redrew the menu
++	 * while BLE_NEXT_STEP kept drawing the BT animation over it. */
++	btn_onOnePress(KEY1, return_to_menu);
++	btn_onOnePress(KEY2, NULL);
++	btn_onLongPress(KEY1, NULL);
++	btn_onLongPress(KEY2, return_to_menu);
++	ble_enable_advertise();
++	if (badge_cfg.ble_security) {
++#if HW_KEY_COUNT == 4
++		auxbtn_onOnePress(KEY4, bt_pairing_bypass);
++#else
++		btn_onLongPress(KEY1, bt_pairing_bypass);
++#endif
++		tmos_stop_task(common_taskid, BLE_NEXT_STEP);
++		disp_passkey(badge_cfg.ble_passkey);
++	} else {
++		start_ble_animation();
++#if HW_KEY_COUNT == 4
++		auxbtn_onOnePress(KEY4, return_to_menu);
++#else
++		btn_onLongPress(KEY1, return_to_menu);
++#endif
++	}
++}
++
++/* The PIN or the security switch changed over USB (ble_security_changed()):
++ * BT-PAIRING still showed the old state, so set it up again. */
++void bt_pairing_refresh()
++{
++	if (mode == DOWNLOAD && !streaming_enabled)
++		enter_bt_pairing();
++}
++
+ static void menu_select(){
+     switch (menu_cursor) {
+         case MENU_IDX_ANIMATION:
+@@ -473,29 +559,7 @@ static void menu_select(){
+             mode_setup_normal();
              break;
          case MENU_IDX_BLE:
- 			mode = DOWNLOAD;
-+			/* KEY1 short press used to stay on menu_up, which redrew the menu
-+			 * while BLE_NEXT_STEP kept drawing the BT animation over it. */
-+			btn_onOnePress(KEY1, return_to_menu);
- 			btn_onOnePress(KEY2, NULL);
- 			btn_onLongPress(KEY1, NULL);
- 			btn_onLongPress(KEY2, return_to_menu);
-@@ -530,7 +578,7 @@ static void disp_stopwatch()
+-			mode = DOWNLOAD;
+-			btn_onOnePress(KEY2, NULL);
+-			btn_onLongPress(KEY1, NULL);
+-			btn_onLongPress(KEY2, return_to_menu);
+-			if (badge_cfg.ble_security) {
+-				uint16_t auth_code = tmos_rand() % 10000;
+-				legacy_set_auth_code(auth_code);
+-				ble_enable_advertise();
+-		#if HW_KEY_COUNT == 4
+-				auxbtn_onOnePress(KEY4, bt_pairing_bypass);
+-		#else
+-				btn_onLongPress(KEY1, bt_pairing_bypass);
+-		#endif
+-				disp_auth_code(auth_code);
+-			} else {
+-				ble_enable_advertise();
+-				start_ble_animation();
+-		#if HW_KEY_COUNT == 4
+-				auxbtn_onOnePress(KEY4, return_to_menu);
+-		#else
+-				btn_onLongPress(KEY1, return_to_menu);
+-		#endif
+-			}
++			enter_bt_pairing();
+ 			break;
+         case MENU_IDX_CLOCK:
+             enter_clock_submenu();
+@@ -530,7 +594,7 @@ static void disp_stopwatch()
      buf[6] = '0' + centis % 10;
      buf[7] = '\0';
  
@@ -798,7 +1329,7 @@ index 7b4b3c6..d23ee1b 100644
      fb_puts(buf, 7, 2, 2);  
  }
  
-@@ -553,6 +601,7 @@ static void sw_reset()
+@@ -553,6 +617,7 @@ static void sw_reset()
  
  static void sw_back()
  {
@@ -806,7 +1337,7 @@ index 7b4b3c6..d23ee1b 100644
      sw_state = SW_STOPPED;
      tmos_stop_task(common_taskid, STOPWATCH_TICK);
      enter_clock_submenu();
-@@ -563,7 +612,7 @@ static int clock_submenu_sel = 0;
+@@ -563,7 +628,7 @@ static int clock_submenu_sel = 0;
  
  static void disp_clock_submenu()
  {
@@ -815,7 +1346,7 @@ index 7b4b3c6..d23ee1b 100644
      if (clock_submenu_sel == 0)
          fb_putchar_small('>', 0, 0);
      else
-@@ -591,6 +640,7 @@ static void clock_submenu_select()
+@@ -591,6 +656,7 @@ static void clock_submenu_select()
          btn_onLongPress(KEY2, enter_clock_submenu);
      } else {
          // Enter Stopwatch mode
@@ -823,7 +1354,7 @@ index 7b4b3c6..d23ee1b 100644
          sw_state = SW_STOPPED;
          sw_centiseconds = 0;
          disp_stopwatch();
-@@ -605,7 +655,7 @@ static int security_submenu_sel = 0;  // 0 = ENABLE, 1 = DISABLE
+@@ -605,7 +671,7 @@ static int security_submenu_sel = 0;  // 0 = ENABLE, 1 = DISABLE
  
  static void disp_security_submenu()
  {
@@ -832,7 +1363,22 @@ index 7b4b3c6..d23ee1b 100644
      if (security_submenu_sel == 0)
          fb_putchar_small('>', 0, 0);
      else
-@@ -684,7 +734,7 @@ static int games_submenu_sel = 0;
+@@ -625,12 +691,13 @@ static void security_submenu_select()
+ {
+     badge_cfg.ble_security = (security_submenu_sel == 0) ? 1 : 0;
+     cfg_writeflash_def(&badge_cfg);
++    ble_security_changed();
+     return_to_menu();
+ }
+ 
+ static void bt_pairing_bypass()
+ {
+-    legacy_bypass_auth();       // skip auth for this session
++    ble_security_bypass();      // let the next client in without pairing
+ #if HW_KEY_COUNT == 4
+     auxbtn_onOnePress(KEY4, return_to_menu);  // restore KEY4 to normal
+ #else
+@@ -684,7 +751,7 @@ static int games_submenu_sel = 0;
  
  static void disp_games_submenu(void)
  {
@@ -841,7 +1387,7 @@ index 7b4b3c6..d23ee1b 100644
      static const char *labels[] = { "SNAKE", "FLAPPY", "PONG" };
  
      int page  = games_submenu_sel / 2;
-@@ -749,9 +799,11 @@ void return_to_menu()
+@@ -749,9 +816,11 @@ void return_to_menu()
      tmos_stop_task(common_taskid, CLOCK_TICK);
      tmos_stop_task(common_taskid, STOPWATCH_TICK);
      sw_state = SW_STOPPED;
@@ -853,7 +1399,7 @@ index 7b4b3c6..d23ee1b 100644
      btn_onOnePress(KEY1, menu_up);
      btn_onOnePress(KEY2, menu_down);
  #if HW_KEY_COUNT == 4
-@@ -766,23 +818,63 @@ void return_to_menu()
+@@ -766,23 +835,63 @@ void return_to_menu()
      disp_menu();
  }
  
@@ -925,7 +1471,7 @@ index 7b4b3c6..d23ee1b 100644
  			DelayMs(500);
  			return;
  		}
-@@ -802,18 +894,34 @@ void reload_bmlist()
+@@ -802,18 +911,34 @@ void reload_bmlist()
  	load_bmlist();
  }
  
@@ -962,7 +1508,7 @@ index 7b4b3c6..d23ee1b 100644
      fb_puts_small("BLUETOOTH", 9, 4, 0);
      fb_puts_small("OFF", 3, 4, 6);
  }
-@@ -827,9 +935,12 @@ void handle_after_rx()
+@@ -827,9 +952,12 @@ void handle_after_rx()
          tmos_stop_task(common_taskid, STOPWATCH_TICK);
          sw_state = SW_STOPPED;
          clock_active = 0;
@@ -978,7 +1524,7 @@ index 7b4b3c6..d23ee1b 100644
      }
  }
  
-@@ -840,12 +951,15 @@ int main()
+@@ -840,12 +968,15 @@ int main()
  	debug_init();
  	PRINT("\nDebug console is on UART%d\n", DEBUG);
  
@@ -997,7 +1543,7 @@ index 7b4b3c6..d23ee1b 100644
  	TMR0_ITCfg(ENABLE, TMR0_3_IT_CYC_END);
  	PFIC_EnableIRQ(TMR0_IRQn);
  
-@@ -863,19 +977,34 @@ int main()
+@@ -863,19 +994,34 @@ int main()
  #endif
  
  	power_init();
@@ -1034,7 +1580,7 @@ index 7b4b3c6..d23ee1b 100644
  
  	spawn_tasks();
  	btn_init_task();
-@@ -887,10 +1016,12 @@ int main()
+@@ -887,10 +1033,12 @@ int main()
  	pong_init();
  	stop_all_animation();
  
@@ -1049,7 +1595,7 @@ index 7b4b3c6..d23ee1b 100644
  	}
  }
  
-@@ -899,20 +1030,36 @@ __HIGH_CODE
+@@ -899,20 +1047,36 @@ __HIGH_CODE
  void TMR0_IRQHandler(void)
  {
  	static int i;
@@ -1087,13 +1633,20 @@ index 7b4b3c6..d23ee1b 100644
 +
  		TMR0_ClearITFlag(TMR0_3_IT_CYC_END);
  	}
- }
+-}
+\ No newline at end of file
++}
 \ No newline at end of file
 diff --git a/src/ngctrl.c b/src/ngctrl.c
-index b5a687e..9b2a8bb 100644
+index b5a687e..6c7375b 100644
 --- a/src/ngctrl.c
 +++ b/src/ngctrl.c
-@@ -8,6 +8,11 @@
+@@ -4,10 +4,21 @@
+ #include "CH583SFR.h"
+ 
+ #include "ble/profile.h"
++#include "ble/setup.h"
+ #include "power.h"
  #include "debug.h"
  #include "config.h"
  #include "leddrv.h"
@@ -1102,10 +1655,29 @@ index b5a687e..9b2a8bb 100644
 +
 +/* Replies go back over the USB interface the request came in on */
 +static void (*ng_reply)(uint8_t *buf, uint8_t len) = hiddev_reply;
++
++/* Set while a USB frame is being handled (in the USB ISR). The BLE PIN and
++ * the security switch are only changed from USB: whoever has the badge on a
++ * cable has it in hand anyway. */
++static volatile uint8_t ng_from_usb;
  
  // TODO: Some of configs can be added, just listing:
  // - Remote brighness adjusting
-@@ -140,7 +145,9 @@ static uint8_t cfg_splash_speed(uint8_t *val, uint16_t len)
+@@ -130,7 +141,13 @@ uint8_t load_fallback_cfg(uint8_t *val, uint16_t len)
+ {
+ 	PRINT(__func__);
+ 	PRINT("\n");
++	uint8_t sec = badge_cfg.ble_security;
++	uint32_t key = badge_cfg.ble_passkey;
+ 	cfg_fallback(&badge_cfg);
++	if (!ng_from_usb) {
++		badge_cfg.ble_security = sec;
++		badge_cfg.ble_passkey = key;
++	}
+ 	return 0;
+ }
+ 
+@@ -140,7 +157,9 @@ static uint8_t cfg_splash_speed(uint8_t *val, uint16_t len)
  	PRINT("\n");
  
  	if (len < 2) return -2;
@@ -1116,7 +1688,7 @@ index b5a687e..9b2a8bb 100644
  	if (ms < SPLASH_MIN_SPEED_T)
  		return -1;
  
-@@ -148,6 +155,14 @@ static uint8_t cfg_splash_speed(uint8_t *val, uint16_t len)
+@@ -148,6 +167,14 @@ static uint8_t cfg_splash_speed(uint8_t *val, uint16_t len)
  	return 0;
  }
  
@@ -1131,7 +1703,7 @@ index b5a687e..9b2a8bb 100644
  static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
  {
  	PRINT(__func__);
-@@ -161,6 +176,75 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
+@@ -161,6 +188,118 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
  	return 0;
  }
  
@@ -1204,10 +1776,53 @@ index b5a687e..9b2a8bb 100644
 +	return 0;
 +}
 +
++/* 0 = open, 1 = clients must pair with the PIN. Saved and applied at once. */
++static uint8_t cfg_security(uint8_t *val, uint16_t len)
++{
++	if (!ng_from_usb) return -3;
++	if (len < 1) return -2;
++	badge_cfg.ble_security = val[0] != 0;
++	cfg_writeflash_def(&badge_cfg);
++	ble_security_changed();
++	return 0;
++}
++
++/* No payload: replies 'P' 'I' 'N' passkey u32 LE, security, bond count.
++ * passkey u32 LE: sets the PIN (0..999999), saved at once. Every bond made
++ * with the old PIN is erased, so all devices pair again with the new one. */
++static uint8_t cfg_passkey(uint8_t *val, uint16_t len)
++{
++	if (!ng_from_usb) return -3;
++	if (len == 0) {
++		uint32_t k = badge_cfg.ble_passkey;
++		uint8_t r[64] = { 'P', 'I', 'N', k & 0xff, (k >> 8) & 0xff,
++		                  (k >> 16) & 0xff, k >> 24, badge_cfg.ble_security,
++		                  ble_bond_count() };
++		ng_reply(r, sizeof(r));
++		return 0;
++	}
++	if (len < 4) return -2;
++	uint32_t k = val[0] | (val[1] << 8) | ((uint32_t)val[2] << 16)
++	             | ((uint32_t)val[3] << 24);
++	if (k > BLE_PASSKEY_MAX) return -1;
++	badge_cfg.ble_passkey = k;
++	cfg_writeflash_def(&badge_cfg);
++	ble_forget_bonds();
++	ble_security_changed();
++	return 0;
++}
++
++static uint8_t cfg_forget_bonds(uint8_t *val, uint16_t len)
++{
++	if (!ng_from_usb) return -3;
++	ble_forget_bonds();
++	return 0;
++}
++
  uint8_t misc(uint8_t *val, uint16_t len)
  {
  	PRINT(__func__);
-@@ -170,6 +254,10 @@ uint8_t misc(uint8_t *val, uint16_t len)
+@@ -170,6 +309,13 @@ uint8_t misc(uint8_t *val, uint16_t len)
  	const uint8_t (*misc_cmd[])(uint8_t *, uint16_t) = {
  		cfg_splash_speed,
  		cfg_led_brightness,
@@ -1215,10 +1830,13 @@ index b5a687e..9b2a8bb 100644
 +		cfg_battery,
 +		cfg_status,
 +		cfg_charging_screen,
++		cfg_security,
++		cfg_passkey,
++		cfg_forget_bonds,
  	};
  
  	uint8_t fn = val[0];
-@@ -194,6 +282,100 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
+@@ -194,6 +340,109 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
  
  #define CMD_LUT_LEN (sizeof(cmd_lut) / sizeof(cmd_lut[0]))
  
@@ -1283,19 +1901,20 @@ index b5a687e..9b2a8bb 100644
 +int ng_usb_rx(uint8_t *buf, uint16_t len)
 +{
 +	ng_reply = hiddev_reply;
++	ng_from_usb = 1;
 +	ng_usb_feed(buf, len);
++	ng_from_usb = 0;
 +	return 0;
 +}
 +
 +/* CDC is a byte stream: the host packs frames back to back, so a packet can
 + * end one frame and start the next, and a header can be split between two
 + * packets. Keep feeding until the packet is used up. */
-+int ng_cdc_rx(uint8_t *buf, uint16_t len)
++static void ng_cdc_feed(uint8_t *buf, uint16_t len)
 +{
 +	static uint8_t hdr[NG_USB_HDR_LEN];
 +	static uint16_t hdr_have;
 +
-+	ng_reply = cdc_reply;
 +	while (len) {
 +		if (ng_usb_expect == 0 && !legacy_usb_busy()
 +		    && (hdr_have || len < NG_USB_HDR_LEN)) {
@@ -1304,7 +1923,7 @@ index b5a687e..9b2a8bb 100644
 +				len--;
 +			}
 +			if (hdr_have < NG_USB_HDR_LEN)
-+				return 0;
++				return;
 +			hdr_have = 0;
 +			ng_usb_feed(hdr, NG_USB_HDR_LEN);
 +			continue;
@@ -1313,6 +1932,14 @@ index b5a687e..9b2a8bb 100644
 +		buf += n;
 +		len -= n;
 +	}
++}
++
++int ng_cdc_rx(uint8_t *buf, uint16_t len)
++{
++	ng_reply = cdc_reply;
++	ng_from_usb = 1;
++	ng_cdc_feed(buf, len);
++	ng_from_usb = 0;
 +	return 0;
 +}
 +

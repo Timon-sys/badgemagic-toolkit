@@ -137,6 +137,12 @@ label.chk { display: inline-flex; gap: 4px; align-items: center; }
         <button data-v="1">on</button><button data-v="0">off</button></span></div>
       <div class="set"><input type="text" id="bleName" maxlength="20" placeholder="Bluetooth name">
         <button id="btnName" data-need="custom">Rename</button></div>
+      <div class="set"><span>Bluetooth PIN <span class="hint" id="pinHint">(USB only)</span></span><span class="seg" id="bleSec">
+        <button data-v="1">required</button><button data-v="0">off</button></span></div>
+      <div class="set"><input type="text" id="pinIn" maxlength="6" inputmode="numeric" placeholder="6-digit PIN">
+        <button id="btnPin" data-need="pin">Set</button><button id="btnPinRnd" data-need="pin">Random</button></div>
+      <div class="set"><span class="hint" id="bondInfo"></span>
+        <button id="btnForget" data-need="pin">Forget paired devices</button></div>
     </section>
     <section class="card">
       <h2>Power</h2>
@@ -157,6 +163,7 @@ const COLS = 44, ROWS = 11;
 const VID = 0x0416, PID = 0x5020;
 const CMD_POWER = 1, CMD_STREAM_SET = 2, CMD_STREAM_BM = 3, CMD_BLE = 4, CMD_SAVE = 6, CMD_MISC = 8;
 const MISC_SPLASH = 0, MISC_BRIGHTNESS = 1, MISC_TIME = 2, MISC_BATTERY = 3, MISC_STATUS = 4;
+const MISC_SECURITY = 6, MISC_PIN = 7, MISC_FORGET_BONDS = 8;  // firmware 1.4.0, USB only
 const MODES = ["menu", "slots", "BT download", "clock", "game", "power off"];
 const SLOT_MODES = ["left", "right", "up", "down", "center", "fast", "drop", "curtain", "laser"];
 const APP_FONT = __APPFONT__;
@@ -274,7 +281,8 @@ function timePayload() {
 
 const NG_NAMES = { 1: p => ["power off", "power ?", "reboot"][p[1]] || "power", 2: p => p[1] ? "live off" : "live on",
   3: () => "live frame", 4: p => p[1] ? "ble name" : "ble always-on", 6: () => "save",
-  8: p => ["splash", "brightness", "set time", "battery?", "status?"][p[1]] || "misc" };
+  8: p => ["splash", "brightness", "set time", "battery?", "status?", "charging scr",
+           "security", p.length > 2 ? "set pin" : "pin?", "forget bonds"][p[1]] || "misc" };
 const ngName = p => (NG_NAMES[p[0]] || (() => "cmd " + p[0]))(p);
 
 const traffic = {
@@ -336,7 +344,7 @@ class HidLink {
   onReport(e) {
     const d = new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength);
     const magic = String.fromCharCode(d[0], d[1], d[2]);
-    rx(d, { STA: "status", BAT: "battery" }[magic] || "report");
+    rx(d, { STA: "status", BAT: "battery", PIN: "pin" }[magic] || "report");
     const w = this.waiter;
     if (w && String.fromCharCode(d[0], d[1], d[2]) === w.magic) { this.waiter = null; w.done(d); }
   }
@@ -359,7 +367,18 @@ class HidLink {
       firmware: str(44, 64), bleAlwaysOn: !!r[4], brightness: r[5], splashMs: v.getUint16(6, true),
       bleName: str(10, 30), time: `${y}-${p2(r[32])}-${p2(r[33])} ${p2(r[34])}:${p2(r[35])}:${p2(r[36])}`,
       mv: v.getUint16(39, true), charging: !!r[41], mode: MODES[r[42]] ?? String(r[42]), streaming: !!(r[43] & 1),
+      bleSecurity: !!r[9], ...await this.pinInfo(),
     };
+  }
+  // firmware before 1.4.0 doesn't answer: no PIN fields then
+  // (asked once per link, so the keep-alive ping doesn't wait 1 s each time)
+  async pinInfo() {
+    if (this.noPin) return {};
+    try {
+      const r = await this.query([CMD_MISC, MISC_PIN], "PIN");
+      const v = new DataView(r.buffer, r.byteOffset, r.byteLength);
+      return { pin: v.getUint32(3, true), bleSecurity: !!r[7], bonds: r[8] };
+    } catch { this.noPin = true; return {}; }
   }
   async upload(pkt) {
     const p = new Uint8Array(Math.ceil(pkt.length / 64) * 64); p.set(pkt);
@@ -369,6 +388,9 @@ class HidLink {
 }
 
 const U = n => BluetoothUUID.canonicalUUID(n);
+const pinRefused = e => e.name === "SecurityError" || /authori|authenti|insufficient|security/i.test(e.message);
+const PIN_HINT = "the badge wants its Bluetooth PIN: pair this device in its Bluetooth settings " +
+                 "(Windows shows an “Add device” notification), then reconnect";
 const dvBytes = v => new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
 class BleLink {
   constructor(dev) { this.dev = dev; this.kind = "ble"; }
@@ -378,7 +400,15 @@ class BleLink {
   async open() {
     try { await withTimeout(this._open(), 12000, "Bluetooth connect"); }
     catch (e) { try { this.dev.gatt.disconnect(); } catch {} throw e; }
-    this._listen().catch(() => {});  // nice to have; never let it block or fail the connect
+    // nice to have; never let it block or fail the connect. But the badge refuses
+    // it like every write while its PIN is required and this device isn't paired,
+    // and battery reads still work then, so this is where that shows up first.
+    this._listen().catch(e => {
+      if (!pinRefused(e)) return;
+      this.pinNeeded = true;
+      log(PIN_HINT);
+      refreshUi();
+    });
   }
   // f056 notifies the 1-byte ng status after each command: shows up as RX in the monitor
   async _listen() {
@@ -402,8 +432,23 @@ class BleLink {
   async ng(payload) {
     if (!this.ngc) throw new Error("this badge has no ng service (factory firmware?)");
     const p = Uint8Array.from(payload);
-    await withTimeout(this.ngc.writeValueWithResponse(p), 3000, "Bluetooth write");
+    await this.write(this.ngc, p);
     tx(p, ngName(p));
+  }
+  // A badge with its PIN required refuses writes until this device has paired
+  // (ATT error 5). That isn't a lost link, so don't let it look like one.
+  async write(c, p) {
+    try { await withTimeout(c.writeValueWithResponse(p), 3000, "Bluetooth write"); }
+    catch (e) {
+      if (pinRefused(e)) {
+        this.pinNeeded = true; refreshUi();
+        const err = new Error(PIN_HINT);
+        err.name = "PinError";
+        throw err;
+      }
+      throw e;
+    }
+    if (this.pinNeeded) { this.pinNeeded = false; refreshUi(); }  // paired in the meantime
   }
   async status() {
     const s = { firmware: this.fw };
@@ -418,7 +463,7 @@ class BleLink {
   async upload(pkt) {
     const p = new Uint8Array(Math.ceil(pkt.length / 16) * 16); p.set(pkt);
     for (let i = 0, n = p.length / 16; i < p.length; i += 16) {
-      await withTimeout(this.legacy.writeValueWithResponse(p.subarray(i, i + 16)), 3000, "Bluetooth write");
+      await this.write(this.legacy, p.subarray(i, i + 16));
       tx(p.subarray(i, i + 16), `upload ${i / 16 + 1}/${n}`);
     }
     // the firmware takes its clock from the header only when the transfer ends, so correct it
@@ -612,6 +657,11 @@ function refreshUi() {
   $("btnLive").disabled = !link || !custom;
   document.querySelectorAll("[data-need=custom], #bright button, #splash button, #bleOn button")
     .forEach(b => b.disabled = !link || !custom);
+  const pinOk = !!link && link.kind === "usb" && status.pin != null;
+  document.querySelectorAll("[data-need=pin], #bleSec button").forEach(b => b.disabled = !pinOk);
+  $("pinIn").disabled = !pinOk;
+  $("pinHint").textContent = !link || pinOk ? "(USB only)"
+    : link.kind === "usb" ? "(needs firmware 1.4.0)" : "(change it over USB)";
 
   const s = status, st = [];
   if (link) {
@@ -621,12 +671,16 @@ function refreshUi() {
     if (s.mode) st.push(stat("showing", s.streaming ? "live picture" : s.mode));
     if (s.bleName) st.push(stat("Bluetooth name", esc(s.bleName)));
     if (s.firmware) st.push(stat("firmware", esc(s.firmware)));
-    if (link.kind === "ble" && custom) st.push(stat("more", '<small>clock & settings show over USB</small>'));
+    if (link.kind === "ble" && link.pinNeeded) st.push(stat("Bluetooth PIN", '<small>needed: pair this device first</small>'));
+    else if (link.kind === "ble" && custom) st.push(stat("more", '<small>clock & settings show over USB</small>'));
   }
   $("stats").innerHTML = st.join("");
   setSeg("bright", s.brightness);
   setSeg("splash", s.splashMs == null ? null : s.splashMs ? 1 : 0);
   setSeg("bleOn", s.bleAlwaysOn == null ? null : s.bleAlwaysOn ? 1 : 0);
+  setSeg("bleSec", s.pin == null ? null : s.bleSecurity ? 1 : 0);
+  if (s.pin != null && document.activeElement !== $("pinIn")) $("pinIn").value = String(s.pin).padStart(6, "0");
+  $("bondInfo").textContent = s.bonds == null ? "" : `${s.bonds} device${s.bonds === 1 ? "" : "s"} paired`;
   if (s.bleName && document.activeElement !== $("bleName")) $("bleName").value = s.bleName;
 }
 
@@ -649,6 +703,35 @@ $("btnName").onclick = () => {
   const n = $("bleName").value.trim();
   if (!n || !/^[\x20-\x7e]{1,20}$/.test(n)) return log("name: 1-20 plain ASCII characters");
   saveSetting(`name "${n}"`, [CMD_BLE, 1, ...[...n].map(c => c.charCodeAt(0))], true);
+};
+// security, PIN and bonds are saved by the badge itself (no CMD_SAVE) and only over USB
+async function pinCommand(label, payload) {
+  await run(label, async l => {
+    await l.ng(payload); await sleep(1000);
+    log(label);
+    try { status = await l.status(); } catch {}
+    refreshUi();
+  }).catch(() => {});
+}
+$("bleSec").onclick = e => {
+  const v = e.target.dataset.v;
+  if (v != null) pinCommand(+v ? "Bluetooth PIN required: devices pair with it once" : "Bluetooth PIN off: anyone in range can connect",
+                            [CMD_MISC, MISC_SECURITY, +v]);
+};
+function setPin(n) {
+  if (!confirm(`Set the PIN to ${String(n).padStart(6, "0")}? Every paired device has to pair again ` +
+               "(remove the badge in its Bluetooth settings first).")) return;
+  pinCommand("PIN set, pairings removed", [CMD_MISC, MISC_PIN, n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, n >>> 24]);
+}
+$("btnPin").onclick = () => {
+  const t = $("pinIn").value.trim();
+  if (!/^[0-9]{6}$/.test(t)) return log("PIN: 6 digits (Bluetooth passkeys always have 6)");
+  setPin(+t);
+};
+$("btnPinRnd").onclick = () => setPin(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000);
+$("btnForget").onclick = () => {
+  if (confirm("Forget every paired device? They have to pair again with the PIN."))
+    pinCommand("paired devices forgotten", [CMD_MISC, MISC_FORGET_BONDS]);
 };
 $("btnTime").onclick = () => run("time", async l => { await l.ng(timePayload()); log("clock set"); });
 $("btnReboot").onclick = () => run("reboot", rebootAndRestore);

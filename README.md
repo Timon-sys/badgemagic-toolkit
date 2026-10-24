@@ -43,6 +43,9 @@ What you notice, and what you can do now that you couldn't before:
   steady. The random bright pixel blips while redrawing, saving or using
   Bluetooth are gone too.
 - **Always-on Bluetooth that actually works.** See [below](#always-on-bluetooth).
+- **A Bluetooth PIN that actually protects the badge.** With security on,
+  a phone or PC has to pair with a 6-digit PIN once (like a Meshtastic
+  node) before it can send anything. See [Bluetooth PIN](#bluetooth-pin).
 - **Control everything from the PC, over USB or Bluetooth.** `badgetool.py`
   reads the battery voltage and the badge's settings, sets the clock,
   brightness and Bluetooth name, and uploads text and images.
@@ -93,14 +96,11 @@ badge.
   connection open until you quit it).
 - It costs some battery even when nothing is connected; we haven't measured
   how much. Turn it off for long days on battery.
-- **Anyone in range can control the badge.** Bluetooth has no protection
-  for the `ng` commands: whoever is nearby can stream to it, change the
-  brightness, the name or the clock, reboot it or switch it off. The PIN
-  from the badge's SECURITY menu only guards uploads of new slots, and
-  `badgetool.py` can't send that PIN yet, so with security on, uploads over
-  Bluetooth fail (`GATT Protocol Error: Unlikely Error`). USB isn't
-  affected. If that matters to you, keep always-on off: then the badge is
-  only reachable while you're in the BT-PAIRING menu.
+- **With security off, anyone in range can control the badge:** stream to
+  it, upload slots, change the brightness, the name or the clock, reboot
+  it or switch it off. Switch on the [Bluetooth PIN](#bluetooth-pin), or
+  keep always-on off so the badge is only reachable while you're in the
+  BT-PAIRING menu.
 - The Bluetooth name shows in scans; the app finds the badge by its service
   ID, so any name works with the app.
 
@@ -154,6 +154,51 @@ python badgetool.py status          # everything the badge reports
 python badgetool.py text "Hello" "Second slot" --mode center
 ```
 
+### Bluetooth PIN
+
+With security on (firmware 1.4.0 or later), a device has to pair with the
+badge's 6-digit PIN before it can send anything over Bluetooth: no slot
+uploads, no commands, no streaming. Each device types the PIN once; the
+badge remembers it (a bond) and later connections need no PIN. USB is never
+affected, and the PIN and the security switch can only be changed over USB.
+
+```
+python badgetool.py pin 123456      # or: pin random; 'pin' alone shows it and the paired devices
+python badgetool.py security on     # saved and applied at once, no reboot
+python badgetool.py pair --ble      # on Windows: brings up the pairing notification
+```
+
+- **Pairing on Windows:** as soon as an unpaired PC connects, the badge asks
+  for pairing and Windows shows an "Add device" notification for it. Click
+  it and type the PIN. `badgetool.py pair --ble` connects and waits for
+  that. If Windows says "connection error", the connection that brought up
+  the notification was already gone; Settings, Bluetooth, Add device works
+  every time. `badgetool.py unpair --ble` removes the pairing again.
+- **Linux:** `bluetoothctl`, then `pair ADDRESS` and type the PIN.
+- **Phones:** Android asks for the PIN by itself when the web panel
+  connects. The Badge Magic app hasn't been tried with security on yet.
+- **Changing the PIN removes every pairing,** so all devices pair again with
+  the new one. Remove the badge from their Bluetooth settings first, or
+  their old pairing keeps failing. `badgetool.py forget-bonds` removes all
+  pairings without changing the PIN.
+- **On the badge:** the SECURITY menu switches it on and off, and BT-PAIRING
+  shows the PIN while security is on. A long press of the button away
+  from USB (KEY4 on 4-button badges) there lets the next device in without the
+  PIN, until you leave the menu.
+- **How secure:** the default PIN is 123456, so set your own. The fast-BLE
+  builds pair with LE Secure Connections: the PIN can't be recovered from a
+  recorded pairing. The other builds don't have the buffer space for it and
+  use legacy pairing, where someone who records the pairing itself can
+  recover the PIN. Either way an attacker gets one guess per pairing, and
+  devices that pair without the PIN ("Just Works") are refused and
+  forgotten.
+- **Two devices at a time,** say a PC and a phone. Pairing a third makes
+  the badge forget all pairings, and every device pairs again.
+- **When the badge has forgotten a device** (third device, new PIN,
+  `forget-bonds`), that device still keeps its half of the pairing and
+  fails to connect ("operation canceled" on Windows) without asking for
+  the PIN. Remove the badge from its Bluetooth list, then pair again.
+
 ### Commands
 
 | Command | What it does |
@@ -167,6 +212,10 @@ python badgetool.py text "Hello" "Second slot" --mode center
 | `name "NAME"` | Bluetooth name, max 20 characters (badge reboots) |
 | `splash on\|off` | startup animation |
 | `charging-screen 0-60` | seconds the charging screen shows at boot (default 5); 0 boots straight to the slots |
+| `security on\|off` | on = Bluetooth devices must pair with the PIN (USB only, see [Bluetooth PIN](#bluetooth-pin)) |
+| `pin [NNNNNN\|random]` | shows the PIN and the number of paired devices, or sets a new one (removes every pairing; USB only) |
+| `forget-bonds` | removes every paired device (USB only) |
+| `pair --ble` / `unpair --ble` | pairs this PC with the badge / removes the pairing (Windows) |
 | `text MSG [MSG ...]` | one message per slot; options `--mode --speed --blink --border --font thin\|app --preview` |
 | `upload config.toml` | a full Badge Magic config file (see below) |
 | `image pic.png [--invert]` | static image in slot 1; dark pixels light up, `--invert` for light ones |
@@ -236,8 +285,9 @@ only) or **Bluetooth** (Web Bluetooth, desktop and Android). It does text
 slots with a live preview of the scroll modes, a 44×11 draw pad that can
 mirror itself live onto the badge, images, the settings, reboot and power
 off. A keep-alive ping notices a lost badge within a few seconds and
-reconnects. A TX/RX monitor shows every packet. It doesn't have the
-charging-screen setting yet; use `badgetool.py charging-screen` for that.
+reconnects. A TX/RX monitor shows every packet. Over USB it also sets the
+[Bluetooth PIN](#bluetooth-pin). It doesn't have the charging-screen
+setting yet; use `badgetool.py charging-screen` for that.
 
 Both APIs need a secure context: `localhost`, a `file://` page or `https://`.
 It's a single file, so to use it from a phone, put `index.html` on any web
@@ -401,7 +451,12 @@ place than the factory one.
   per frame, about 91 Hz.
 - **Phone app uploads rejected:** the legacy BLE upload refused data as "not
   authed" unless the PIN feature was switched on (upstream issues #190 and
-  #198). The check now only applies when the PIN is on.
+  #198). 1.4.0 replaced that PIN altogether, see below.
+- **The SECURITY PIN protected little:** it was a random 4-digit code, sent
+  as plain text over Bluetooth, that only guarded slot uploads, while every
+  `ng` command stayed open. 1.4.0 uses Bluetooth pairing instead (see
+  [Bluetooth PIN](#bluetooth-pin)). Apps that still send the old code
+  before an upload keep working; the code is skipped.
 - **Always-on Bluetooth did nothing:** advertising was only ever enabled by
   the BT-PAIRING menu, so the setting could only switch off something that
   was already off. It is now enabled at startup, and always-on is the
@@ -517,12 +572,17 @@ place than the factory one.
   ![Charging screen with the battery voltage](pictures/badge-charging-screen-voltage.jpg)
 
 - `ng` misc commands: set time (2), battery reply `BAT` (3), status reply
-  `STA` (4), charging screen seconds (5).
+  `STA` (4), charging screen seconds (5), and over USB only: security on/off
+  (6), PIN (7: set it, or with no argument the `PIN` reply), forget bonds
+  (8).
+- Bluetooth pairing with a PIN and stored bonds (two data flash pages at
+  `0x7A00`, just below the settings). Settings saved by 1.3.0 are
+  taken over; the PIN starts at 123456.
 - The charging screen at boot is a setting: 0 to 255 seconds, default 5,
   0 skips it. Settings saved by older builds are taken over when you update
   (the new field defaults to 5 s), so nothing resets.
 - The firmware names itself after the toolkit release: `status` and the
-  Bluetooth device info show `v0.1-toolkit-1.3.0` (upstream base, then the
+  Bluetooth device info show `v0.1-toolkit-1.4.0` (upstream base, then the
   toolkit version) instead of the git description, which was the same for
   every build here.
 - `ng` commands over USB serial: frames as a plain byte stream (back to back,
@@ -571,7 +631,11 @@ The serial port ignores the baud rate; any setting works.
 
 `ng` commands: next packet (0), power (1), stream set (2), stream bitmap (3),
 BLE settings (4), splash screen upload (5), save (6), load defaults (7),
-misc (8: splash speed, brightness, time, battery, status, charging screen).
+misc (8: splash speed, brightness, time, battery, status, charging screen,
+security, PIN, forget bonds). The `PIN` reply: `'P' 'I' 'N'`, the PIN as
+u32 little endian, security on, number of bonds. With security on, the
+`fee1` and `f055` characteristics answer ATT error 5 (insufficient
+authentication) until the link is paired with the PIN.
 The `STA` reply is layout 2 since 1.3.0: byte 63 holds the charging screen
 seconds, and the version string before it is cut to 19 characters, so
 readers of layout 1 (which stop at its NUL) keep working.
@@ -581,10 +645,10 @@ renaming a badge keeps it compatible with the app.
 
 ## Ideas / not done yet
 
-- **Bluetooth security:** let the PIN cover the `ng` commands too, so a
-  badge with security on can't be controlled by anyone in range, and teach
-  `badgetool.py` and the web panel to ask for the PIN. Today the PIN only
-  guards uploads (see [Always-on Bluetooth](#always-on-bluetooth)).
+- **Bluetooth PIN:** try the Badge Magic app and an iPhone with security
+  on, and the normal (not fast-BLE) builds, which pair without Secure
+  Connections. Only the pb6-fastble build was tested, from Windows and
+  Android (web panel).
 - **Status and battery over BLE:** the replies currently go out over USB
   (HID and serial) only. Sending them as `f056` notifications would give BLE the full
   `status` (voltage, clock, settings) instead of just the battery percentage.
