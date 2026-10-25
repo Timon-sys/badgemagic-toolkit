@@ -58,8 +58,9 @@ What you notice, and what you can do now that you couldn't before:
   HID is awkward: a terminal, a microcontroller, a phone, or a Linux box
   without hidapi.
 - **The phone app works.** Uploads from the Badge Magic app were rejected
-  unless you had switched on a PIN first; now they just work. Renaming the
-  badge doesn't break the app either.
+  unless you had switched on a PIN first; now they just work (with the
+  [Bluetooth PIN](#bluetooth-pin) on, after pairing the phone once).
+  Renaming the badge doesn't break the app either.
 - **Settings and the clock stay put.** Settings survive reboots and
   reflashes, and the clock survives reboots and switching off. It
   [drifts a lot](#ideas--not-done-yet), though, so set it now and then
@@ -126,7 +127,8 @@ python badgetool.py pair --ble      # on Windows: brings up the pairing notifica
   that. If Windows says "connection error", the connection that brought up
   the notification was already gone; Settings, Bluetooth, Add device works
   every time. `badgetool.py unpair --ble` removes the pairing again.
-- **Linux:** `bluetoothctl`, then `pair ADDRESS` and type the PIN.
+- **Linux:** `bluetoothctl`, then `pair ADDRESS` and type the PIN
+  (not tried yet).
 - **Phones:** Android asks for the PIN by itself when the web panel or the
   Badge Magic app connects; both work with security on. iPhones should
   behave the same but haven't been tried.
@@ -148,7 +150,8 @@ python badgetool.py pair --ble      # on Windows: brings up the pairing notifica
   the traffic after it; the other builds don't have the buffer space for
   that and use legacy pairing, where it does.
 - **Two devices at a time,** say a PC and a phone. Pairing a third makes
-  the badge forget all pairings, and every device pairs again.
+  the badge forget all pairings, and every device pairs again (that's how
+  WCH's Bluetooth library handles a full store; we haven't tried it).
 - **When the badge has forgotten a device** (third device, new PIN,
   `forget-bonds`), that device still keeps its half of the pairing and
   fails to connect ("operation canceled" on Windows) without asking for
@@ -375,7 +378,8 @@ Two choices make four files:
   interval and use a bigger packet size (MTU 96), so live streaming over
   Bluetooth runs at 20 to 30 fps instead of about 4. That costs more battery,
   but only while something is connected. Uploads, the phone app and
-  everything else work the same in both.
+  everything else work the same in both, except how they pair with the
+  [Bluetooth PIN](#bluetooth-pin) (Secure Connections only on `fastble`).
 
 | File | `flash` name | LED wiring | Bluetooth | Tested on a badge |
 |---|---|---|---|---|
@@ -631,7 +635,7 @@ with `badgetool.py flash path/to/badgemagic-ch582.bin`.
 |---|---|---|---|
 | Legacy upload | 64-byte reports | the packet as is, unpadded | service `fee0`, characteristic `fee1`, 16-byte writes |
 | `ng` commands | `'N' 'G' len16 payload` in 64-byte reports | the same frames as a byte stream, no padding | service `f055`: write `f057`, notify `f056` |
-| Replies (`STA`, `BAT`, `PIN`) | 64-byte IN report | 64 bytes on the port | not yet |
+| Replies (`STA`, `BAT`, `PIN`) | 64-byte IN report | 64 bytes on the port | not yet (`PIN`: never, it's USB only) |
 
 The serial port ignores the baud rate; any setting works.
 
@@ -640,7 +644,7 @@ BLE settings (4), splash screen upload (5), save (6), load defaults (7),
 misc (8: splash speed, brightness, time, battery, status, charging screen,
 security, PIN, forget bonds). The `PIN` reply: `'P' 'I' 'N'`, the PIN as
 u32 little endian, security on, number of bonds. With security on, the
-`fee1` and `f055` characteristics answer ATT error 5 (insufficient
+characteristics `fee1`, `f057` and `f056` answer ATT error 5 (insufficient
 authentication) until the link is paired with the PIN.
 The `STA` reply is layout 2 since 1.3.0: byte 63 holds the charging screen
 seconds, and the version string before it is cut to 19 characters, so
