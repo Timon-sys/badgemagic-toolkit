@@ -325,6 +325,7 @@ firmware.
 | `test_stream.py` | streaming test patterns, measures USB frame rate (~60 fps) |
 | `test_serial.py` | the same over USB serial; optional port argument |
 | `screen_mirror.py` | Windows only: mirrors the screen (or the area around the mouse) live; several badges stack into one taller display. All options are in `CONFIG` at the top and on the command line |
+| `audio_viz.py` | Windows only: live spectrum of whatever the PC plays (the banner at the top), captured from the speaker output, not the microphone; several badges stack into taller bars. Options in `CONFIG` and on the command line; needs `pip install numpy soundcard` |
 | `battery.py`, `set_time.py`, `set_brightness.py` | single settings over USB |
 | `ble_always_on.py`, `fix_alwayson.py`, `apply_cfg.py` | config + reboot (`apply_cfg.py` resets to defaults, including the name) |
 | `ble_check.py` | connect over BLE and list services; optional address argument |
