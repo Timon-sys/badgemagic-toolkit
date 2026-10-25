@@ -1,5 +1,7 @@
 # badgemagic toolkit
 
+![The badge as a live audio visualizer, streamed from a PC](pictures/badge-audio-visualizer.gif)
+
 > **A note before you dive in:** this is my take on these badges: the things
 > I liked, wanted, and thought were cool to build. It's not a polished
 > product or an official fork. Treat it as an example sketch to build on:
