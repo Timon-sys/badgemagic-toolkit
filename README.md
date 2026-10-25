@@ -380,7 +380,7 @@ Two choices make four files:
 | File | `flash` name | LED wiring | Bluetooth | Tested on a badge |
 |---|---|---|---|---|
 | `badgemagic-ch582-2key.bin` | `normal` | normal | standard | ran on a PB6 board (all but line T); upstream-wired board untested |
-| `badgemagic-ch582-2key-pb6.bin` | `pb6` | PB6 | standard | yes: USB HID, serial and Bluetooth (every command; streaming 4 fps, 150/150 frames) |
+| `badgemagic-ch582-2key-pb6.bin` | `pb6` | PB6 | standard | yes: USB HID, serial and Bluetooth (every command; streaming 4 fps, 150/150 frames); v1.4.0 with the PIN on: every command over USB and Bluetooth, legacy pairing from Windows |
 | `badgemagic-ch582-2key-fastble.bin` | `normal-fastble` | normal | fast | same code as `pb6-fastble` but the pin; upstream-wired board untested |
 | `badgemagic-ch582-2key-pb6-fastble.bin` | `pb6-fastble` | PB6 | fast | yes: USB HID, serial and Bluetooth (every command; streaming 30 fps, 23 fps with nearly every LED lit, 300/300 frames); the phone app (21 to 34 fps) on two badges with v1.2.1; v1.4.0 with the PIN on: every command over USB HID, serial and Bluetooth, pairing from Windows, Android and the app |
 
@@ -652,9 +652,8 @@ renaming a badge keeps it compatible with the app.
 ## Ideas / not done yet
 
 - **Bluetooth PIN:** try an iPhone and Linux (`bluetoothctl`) with
-  security on, and the normal (not fast-BLE) builds, which pair without
-  Secure Connections. Only the pb6-fastble build was tested, from Windows
-  and Android.
+  security on. Tested: `pb6-fastble` from Windows, Android and the app,
+  `pb6` (legacy pairing) from Windows.
 - **Status and battery over BLE:** the replies currently go out over USB
   (HID and serial) only. Sending them as `f056` notifications would give BLE the full
   `status` (voltage, clock, settings) instead of just the battery percentage.
