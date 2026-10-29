@@ -1,0 +1,10 @@
+# Everything badgetool.py can use. Install only the lines you need:
+# none of them are required for the parts of the tool that do not use them.
+hidapi      # USB HID, the default channel
+pyserial    # USB serial (--serial)
+bleak       # Bluetooth
+pillow      # images
+
+# ng/audio_viz.py additionally needs:
+# numpy
+# soundcard
