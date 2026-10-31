@@ -733,6 +733,15 @@ renaming a badge keeps it compatible with the app.
 
 ## Ideas / not done yet
 
+- **Below brightness level 0.** The lowest setting is a 25 % duty cycle, which
+  is the shortest on-time the LED timer can express: a column pair's window is
+  4 ticks of 125 µs and level 0 releases the matrix after one of them. Waiting
+  a few microseconds with `DelayUs()` inside `TMR0_IRQHandler` and releasing
+  there instead gets below that, with the 91 Hz refresh unchanged; one badge ran
+  5, 12, 25 and 50 % on its four levels, clearly darker and no extra flicker.
+  Not shipped: it busy-waits about 5 % of the CPU in the interrupt that already
+  outranks the radio, and four levels mean giving up 75 and 100 % to gain the
+  dim end, so it really wants `BRIGHTNESS_LEVELS` 6.
 - The Bluetooth PIN on an iPhone and from Linux (`bluetoothctl`) with security
   on. Tested so far: `pb6-fastble` from Windows, Android and the app, and `pb6`
   (legacy pairing) from Windows.
