@@ -75,6 +75,7 @@ CMD_POWER, CMD_STREAM_SET, CMD_STREAM_BM, CMD_BLE = 1, 2, 3, 4
 CMD_SAVE, CMD_MISC = 6, 8
 MISC_SPLASH, MISC_BRIGHTNESS, MISC_TIME, MISC_BATTERY, MISC_STATUS, MISC_CHARGING = 0, 1, 2, 3, 4, 5
 MISC_SECURITY, MISC_PIN, MISC_FORGET_BONDS = 6, 7, 8  # firmware 1.4.0, USB only
+MISC_SLOT = 9  # firmware 1.5.0: show slot N / which slots are filled
 MODES = ["menu", "slots", "BT download", "clock", "game", "power off"]
 
 
@@ -312,32 +313,21 @@ class Badge:
         return r
 
     def status(self):
-        r = self.ng_query(bytes([CMD_MISC, MISC_STATUS]), b"STA")
-        y = struct.unpack_from("<H", r, 30)[0]
-        layout = r[3]
-        return {
-            "firmware": r[44:63 if layout >= 2 else 64].split(b"\0")[0].decode(errors="replace"),
-            # layout 2 (firmware 1.3.0) added it; None = firmware too old to have the setting
-            "charging_screen_s": r[63] if layout >= 2 else None,
-            "ble_always_on": bool(r[4]),
-            "brightness": r[5],
-            "splash_ms": struct.unpack_from("<H", r, 6)[0],
-            "reset_after_upload": bool(r[8]),
-            "ble_security": bool(r[9]),
-            "ble_name": r[10:30].split(b"\0")[0].decode(errors="replace"),
-            "time": f"{y:04d}-{r[32]:02d}-{r[33]:02d} {r[34]:02d}:{r[35]:02d}:{r[36]:02d}",
-            "batt_raw": struct.unpack_from("<H", r, 37)[0],
-            "batt_mv": struct.unpack_from("<H", r, 39)[0],
-            "charging": bool(r[41]),
-            "mode": MODES[r[42]] if r[42] < len(MODES) else str(r[42]),
-            "streaming": bool(r[43] & 1),
-            "charging_screen": bool(r[43] & 2),
-        }
+        return parse_status(self.ng_query(bytes([CMD_MISC, MISC_STATUS]), b"STA"))
 
     def battery(self):
         r = self.ng_query(bytes([CMD_MISC, MISC_BATTERY]), b"BAT")
         raw, mv = struct.unpack_from("<HH", r, 3)
         return raw, mv, bool(r[7])
+
+    def show_slot(self, slot=None):
+        """slot 0-7: show it now; None: only ask. Returns (result, filled):
+        result 0 = ok, 'empty' or 'busy'; filled = list of filled slot numbers
+        (0-based). RuntimeError on firmware before 1.5.0."""
+        r = self.ng_query(bytes([CMD_MISC, MISC_SLOT])
+                          + (b"" if slot is None else bytes([slot])), b"SLT")
+        res = {0: 0, 0xFF: "empty", 0xFC: "busy"}.get(r[3], r[3])
+        return res, [i for i in range(8) if r[4] >> i & 1]
 
     def pin_info(self):
         """(pin, security on, paired devices), None on firmware before 1.4.0."""
@@ -366,6 +356,30 @@ class Badge:
 
     def upload_bitmap(self, img, mode="center", speed=4):
         self.upload_slots([make_slot(to_column_groups(img)[0], mode, speed)])
+
+
+def parse_status(r):
+    """The 64-byte 'STA' reply (layout documented above cfg_status() in ngctrl.c)."""
+    y = struct.unpack_from("<H", r, 30)[0]
+    layout = r[3]
+    return {
+        "firmware": r[44:63 if layout >= 2 else 64].split(b"\0")[0].decode(errors="replace"),
+        # layout 2 (firmware 1.3.0) added it; None = firmware too old to have the setting
+        "charging_screen_s": r[63] if layout >= 2 else None,
+        "ble_always_on": bool(r[4]),
+        "brightness": r[5],
+        "splash_ms": struct.unpack_from("<H", r, 6)[0],
+        "reset_after_upload": bool(r[8]),
+        "ble_security": bool(r[9]),
+        "ble_name": r[10:30].split(b"\0")[0].decode(errors="replace"),
+        "time": f"{y:04d}-{r[32]:02d}-{r[33]:02d} {r[34]:02d}:{r[35]:02d}:{r[36]:02d}",
+        "batt_raw": struct.unpack_from("<H", r, 37)[0],
+        "batt_mv": struct.unpack_from("<H", r, 39)[0],
+        "charging": bool(r[41]),
+        "mode": MODES[r[42]] if r[42] < len(MODES) else str(r[42]),
+        "streaming": bool(r[43] & 1),
+        "charging_screen": bool(r[43] & 2),
+    }
 
 
 SLOT_MODES = ["left", "right", "up", "down", "center", "fast", "drop", "curtain", "laser"]
@@ -508,17 +522,20 @@ class BleBadge:
                 if not self.client.is_connected:
                     self._run(self.client.connect())
 
+    def _pin_hint(self, e):
+        # ATT error 5 = insufficient authentication: security is on and
+        # this PC hasn't paired with the badge (or paired with an old PIN)
+        if any(k in str(e) for k in ("rotection", "uthenticat", "0x05")):
+            raise RuntimeError(
+                "the badge wants its pairing PIN: run 'badgetool.py pair --ble "
+                f"{self.address}' once (after a PIN change: 'unpair' first)") from e
+
     def _write(self, uuid, data, retry=True):
         op = lambda: self._run(self.client.write_gatt_char(uuid, data, response=True))
         try:
             return self._retry(op) if retry else op()
         except Exception as e:
-            # ATT error 5 = insufficient authentication: security is on and
-            # this PC hasn't paired with the badge (or paired with an old PIN)
-            if any(k in str(e) for k in ("rotection", "uthenticat", "0x05")):
-                raise RuntimeError(
-                    "the badge wants its pairing PIN: run 'badgetool.py pair --ble "
-                    f"{self.address}' once (after a PIN change: 'unpair' first)") from e
+            self._pin_hint(e)
             raise
 
     def _read(self, uuid):
@@ -529,18 +546,65 @@ class BleBadge:
         self.need_custom()
         self._write(NG_WRITE, payload)
 
-    def status(self):
+    def ng_query(self, payload, magic, timeout=3.0):
+        """Firmware 1.5.0 sends the 64-byte replies as f056 notifications: one
+        on fast-ble builds, equal parts of 2+ bytes with a smaller MTU. The
+        1-byte notifications are the ack ng_parse() sends after every command."""
+        self.need_custom()
+
+        async def run():
+            buf, got = bytearray(), asyncio.Event()
+
+            def on_notify(_, data):
+                data = bytes(data)
+                if len(data) < 2 or (not buf and not data.startswith(magic)):
+                    return
+                buf.extend(data)
+                if len(buf) >= 64:
+                    got.set()
+            await self.client.start_notify(NG_NOTIFY, on_notify)
+            try:
+                await self.client.write_gatt_char(NG_WRITE, payload, response=True)
+                await asyncio.wait_for(got.wait(), timeout)
+            finally:
+                try:
+                    await self.client.stop_notify(NG_NOTIFY)
+                except Exception:
+                    pass
+            return bytes(buf[:64])
+        try:
+            return self._retry(lambda: self._run(run()))
+        except (asyncio.TimeoutError, TimeoutError) as e:
+            raise RuntimeError("no reply over Bluetooth; replies over Bluetooth need "
+                               "firmware 1.5.0 or later ('badgetool.py flash')") from e
+        except Exception as e:
+            self._pin_hint(e)
+            raise
+
+    def devinfo(self):
         s = {k: self._read(u).split(b"\0")[0].decode(errors="replace")
              for k, u in DEVINFO.items()}
         s["battery_pct"] = self.battery_pct()
         return s
 
+    def status(self):
+        """The full status like over USB; on firmware before 1.5.0 only the
+        device info strings and the battery percentage (key 'battery_pct')."""
+        try:
+            return Badge.status(self)
+        except RuntimeError as e:
+            if "no reply" not in str(e):
+                raise
+            return self.devinfo()
+
     def battery_pct(self):
         return self._read(BATT_LEVEL)[0]
 
-    def battery(self):
-        raise RuntimeError("voltage over BLE not implemented yet (firmware TODO); "
-                           "use 'status' for the battery percentage")
+    battery = Badge.battery
+    show_slot = Badge.show_slot
+
+    def pin_info(self):
+        return None  # the PIN reply is USB only, by design
 
     set_time = Badge.set_time
     save = Badge.save
@@ -843,26 +907,33 @@ def cmd_list(a):
 
 def cmd_status(a):
     b = open_one(a)
-    if isinstance(b, BleBadge):
-        s = b.status()
-        b.close()
-        print(f"""address        {b.address}
+    ble = isinstance(b, BleBadge)
+    if ble:
+        s = b.status() if b.kind == "custom" else b.devinfo()
+        if "battery_pct" in s:  # firmware before 1.5.0, or the factory one
+            b.close()
+            print(f"""address        {b.address}
 firmware       {s['firmware']}   ({s['model']}, hardware {s['hardware']})
 battery        {s['battery_pct']} %
-(clock, voltage and settings need USB until the BLE status reply exists)""")
-        return
-    if b.kind != "custom":
+(clock, voltage and settings over Bluetooth need firmware 1.5.0 or later)""")
+            return
+    elif b.kind != "custom":
         print(f"badge kind: {b.kind} ({b.info['man']} / {b.info['prod']})")
         print("factory firmware cannot report anything back; text/image upload works")
         return
-    s = b.status()
+    else:
+        s = b.status()
     pin = b.pin_info()
     b.close()
     if pin is None:
         sec = f"PIN {'on' if s['ble_security'] else 'off'}"
+        if ble:
+            sec += " (PIN and paired devices: USB only)"
     else:
         sec = (f"pairing PIN {pin[0]:06d} {'required' if pin[1] else 'off'}, "
                f"{pin[2]} device{'' if pin[2] == 1 else 's'} paired")
+    if ble:
+        print(f"address        {b.address}")
     print(f"""firmware       {s['firmware']}
 mode           {'charging screen - press a button to finish booting (Bluetooth is off until then)' if s['charging_screen'] else s['mode']}{'  (streaming)' if s['streaming'] else ''}
 clock          {s['time']}{'   <- not set' if s['time'].startswith('2020') else ''}
@@ -875,12 +946,22 @@ charging scr   {'(needs firmware 1.3.0)' if s['charging_screen_s'] is None else 
 
 def cmd_battery(a):
     b = open_one(a)
+    pct_only = False
     try:
         while True:
-            if isinstance(b, BleBadge):  # no voltage reply over BLE yet, only the 0x180F level
-                print(f"{time.strftime('%H:%M:%S')}  {b.battery_pct()} %  (voltage needs USB)")
+            reading = None
+            if not pct_only:
+                try:
+                    reading = b.battery()
+                except RuntimeError as e:
+                    if not isinstance(b, BleBadge) or "no reply" not in str(e):
+                        raise
+                    pct_only = True  # firmware before 1.5.0: only the 0x180F level
+            if pct_only:
+                print(f"{time.strftime('%H:%M:%S')}  {b.battery_pct()} %  "
+                      "(voltage over Bluetooth needs firmware 1.5.0)")
             else:
-                raw, mv, chg = b.battery()
+                raw, mv, chg = reading
                 print(f"{time.strftime('%H:%M:%S')}  {mv/1000:.3f} V  raw {raw:4d}  "
                       f"{'charging' if chg else 'on battery'}")
             if not a.watch:
@@ -890,6 +971,31 @@ def cmd_battery(a):
         pass
     finally:
         b.close()
+
+
+def cmd_slot(a):
+    """Show slot N now (leaves clock, stopwatch, menu or BT-PAIRING), or with
+    no number list the filled slots. Not saved: KEY2 goes on from there."""
+    b = open_one(a)
+    b.need_custom()
+    try:
+        res, filled = b.show_slot(None if a.n is None else a.n - 1)
+    except RuntimeError as e:
+        b.close()
+        sys.exit(str(e) if "no reply" not in str(e)
+                 else "this needs firmware 1.5.0 or later ('badgetool.py flash')")
+    b.close()
+    have = ", ".join(str(i + 1) for i in filled) or "none"
+    if a.n is None:
+        print(f"filled slots: {have}")
+    elif res == 0:
+        print(f"showing slot {a.n}")
+    elif res == "empty":
+        sys.exit(f"slot {a.n} is empty (filled: {have})")
+    elif res == "busy":
+        sys.exit("the badge is busy (a game, a stream or switched off); try again after that")
+    else:
+        sys.exit(f"the badge said {res}")
 
 
 def cmd_time(a):
@@ -1425,6 +1531,8 @@ def main():
     sub.add_parser("status").set_defaults(f=cmd_status)
     s = sub.add_parser("battery"); s.add_argument("-w", "--watch", type=float); s.set_defaults(f=cmd_battery)
     sub.add_parser("time").set_defaults(f=cmd_time)
+    s = sub.add_parser("slot", help="show slot N (1-8) now; no number = list the filled slots")
+    s.add_argument("n", nargs="?", type=int, choices=range(1, 9), metavar="N"); s.set_defaults(f=cmd_slot)
     s = sub.add_parser("brightness"); s.add_argument("level", type=int, choices=range(4)); s.set_defaults(f=cmd_brightness)
     s = sub.add_parser("ble"); s.add_argument("state", choices=["on", "off"]); s.set_defaults(f=cmd_ble)
     s = sub.add_parser("name"); s.add_argument("name"); s.set_defaults(f=cmd_name)

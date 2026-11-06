@@ -1,8 +1,8 @@
 diff --git a/src/ble/peripheral.c b/src/ble/peripheral.c
-index 6870b51..ddd7beb 100644
+index f61cf16..c1ab98c 100644
 --- a/src/ble/peripheral.c
 +++ b/src/ble/peripheral.c
-@@ -21,10 +21,19 @@ typedef struct
+@@ -22,10 +22,19 @@ typedef struct
  #define MIN_ADV_INTERVAL    100 // Advertising interval (units of 0.625ms)
  #define MAX_ADV_INTERVAL    200 // Advertising interval (units of 0.625ms)
  
@@ -25,7 +25,7 @@ index 6870b51..ddd7beb 100644
  
  // GAP - Advertisement data (max size = 31 bytes)
  // keep short, save energy, save the planet
-@@ -77,12 +86,6 @@ static void link_onEstablished(gapRoleEvent_t *pe)
+@@ -82,12 +91,6 @@ static void link_onEstablished(gapRoleEvent_t *pe)
  	if(conn_list.connHandle != GAP_CONNHANDLE_INIT) {
  		// Only allow 1 connection, so the new connection will be dropped:
  		GAPRole_TerminateLink(e->connectionHandle);
@@ -38,7 +38,7 @@ index 6870b51..ddd7beb 100644
  		return;
  	}
  	conn_list.connHandle = e->connectionHandle;
-@@ -90,6 +93,10 @@ static void link_onEstablished(gapRoleEvent_t *pe)
+@@ -95,6 +98,10 @@ static void link_onEstablished(gapRoleEvent_t *pe)
  	conn_list.connSlaveLatency = e->connLatency;
  	conn_list.connTimeout = e->connTimeout;
  	enable_advertising(FALSE);
@@ -49,7 +49,7 @@ index 6870b51..ddd7beb 100644
  }
  
  static void link_onTerminated(gapRoleEvent_t *pe)
-@@ -177,6 +184,17 @@ static uint16 peripheral_task(uint8 task_id, uint16 events)
+@@ -205,6 +212,17 @@ static uint16 peripheral_task(uint8 task_id, uint16 events)
  		return (events ^ SYS_EVENT_MSG);
  	}
  
@@ -67,7 +67,7 @@ index 6870b51..ddd7beb 100644
  	return 0;
  }
  
-@@ -234,8 +252,8 @@ static void gap_init()
+@@ -389,8 +407,8 @@ static void gap_init()
  {
  	GAPRole_PeripheralInit();
  
@@ -79,10 +79,10 @@ index 6870b51..ddd7beb 100644
  	// Set the GAP Role Parameters
  	setup_scan_rsp(badge_cfg.ble_devname, 20);
 diff --git a/src/ble/profile/ng.c b/src/ble/profile/ng.c
-index 1c4789e..d8f01dc 100644
+index 74b8ae3..178fbb0 100644
 --- a/src/ble/profile/ng.c
 +++ b/src/ble/profile/ng.c
-@@ -15,7 +15,8 @@ static uint8_t TxCharVal[256];
+@@ -16,7 +16,8 @@ static uint8_t TxCharVal[256];
  static uint16_t TxLen;
  
  static const uint16_t RxCharUUID = 0xF057;
@@ -93,10 +93,10 @@ index 1c4789e..d8f01dc 100644
  static gattCharCfg_t TxCCCD[1];
  
 diff --git a/src/ble/setup.c b/src/ble/setup.c
-index d4cd66a..9e80c79 100644
+index d733e50..174e663 100644
 --- a/src/ble/setup.c
 +++ b/src/ble/setup.c
-@@ -6,11 +6,13 @@
+@@ -7,11 +7,13 @@
  #include "CH58x_common.h"
  
  #ifndef BLE_BUFF_LEN
@@ -115,7 +115,7 @@ index d4cd66a..9e80c79 100644
  #endif
  
  #ifndef BLE_TX_NUM_EVENT
-@@ -23,7 +25,7 @@
+@@ -24,7 +26,7 @@
  #endif
  
  #ifndef BLE_MEMHEAP_SIZE

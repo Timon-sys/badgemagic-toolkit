@@ -62,6 +62,9 @@ ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
 - Calmer buttons: the button nearest USB steps one slot per press instead of
   starting an automatic cycle, a long press on the other button changes
   brightness, and a long press on the button nearest USB opens the menu.
+- Remote control without buttons: `badgetool.py slot 3` jumps to slot 3 from
+  wherever the badge is (clock, menu, BT-PAIRING), and `status` tells you
+  everything, voltage and clock included, over USB and Bluetooth alike.
 
 The full list of upstream bugs this fixes is under
 [What was broken upstream](#what-was-broken-upstream).
@@ -105,7 +108,8 @@ With the patched firmware, this is the whole picture.
 | Text and image uploads | yes | yes | yes |
 | Live streaming | ~60 fps | ~60 fps | 20 to 30 fps on `fastble` builds, about 4 fps otherwise ([details](#streaming-speed)) |
 | Settings (clock, brightness, name, always-on, splash, charging screen) | yes | yes | yes |
-| Full status and battery voltage | yes | yes | no: battery percentage and firmware version only ([why](#ideas--not-done-yet)) |
+| Full status and battery voltage | yes | yes | yes (firmware 1.5.0 and later; before that the battery percentage and firmware version only) |
+| Jump to a slot (`slot N`) | yes | yes | yes (firmware 1.5.0 and later) |
 | PIN settings (`security`, `pin`, `forget-bonds`) | yes | yes | no, by design |
 | Flashing firmware | ISP mode only | no | no |
 
@@ -144,6 +148,7 @@ python badgetool.py text "Hello" "Second slot" --mode center
 | `status` | mode, clock, brightness, Bluetooth settings, battery |
 | `battery [-w SECONDS]` | voltage, raw ADC value and charging state, optionally refreshed |
 | `time` | sets the badge clock to the PC time |
+| `slot [N]` | shows slot N (1-8) now, leaving the clock, menu or BT-PAIRING; the button steps on from there. Without N: which slots are filled |
 | `brightness 0-3` | 3 = brightest. 0 flickers slightly, by design |
 | `ble on\|off` | always-on Bluetooth (badge reboots) |
 | `name "NAME"` | Bluetooth name, max 20 characters (badge reboots) |
@@ -375,8 +380,10 @@ Both browser APIs need a secure context: `localhost`, a `file://` page or
 `https://`. The panel is a single file, so to use it from a phone, put
 `index.html` on any web server that has HTTPS. A self-signed certificate is
 fine: click through the warning once and Web Bluetooth works. Factory-firmware
-badges get text and images only, and over Bluetooth the status shows the
-battery percentage and firmware version, as `badgetool.py` does.
+badges get text and images only. Over Bluetooth, firmware older than 1.5.0
+shows only the battery percentage and firmware version, as `badgetool.py`
+does. Below the messages, "Show on the badge now" jumps to a slot (empty slots
+are greyed out; firmware 1.5.0 and later).
 
 `index.html` is built from `panel.src.html` by `python build.py`, which copies
 the fonts out of `badgetool.py`. Edit the source, then rebuild.
@@ -629,6 +636,11 @@ storage, and the screens and buttons.
   valid.
 - The clock was lost on every boot. The RTC is only initialised when it holds
   no valid date, so the time survives reboots and a power-off with the button.
+- A memory leak that crashed the badge: every time the slots were reloaded
+  (after an upload, leaving the menu or BT-PAIRING), the pixel buffers of all
+  slots were left allocated. A handful of reloads ran the heap dry and the badge
+  crashed, rebooting with its clock reset to 2020. Found because jumping between
+  slots reloads them every time: a few jumps in a row were enough.
 
 #### Screens, power and buttons
 
@@ -689,7 +701,7 @@ BUILD_DIR=usb-c-2key-t6 KEY_COUNT=2 LED_T_PB6=1 make   # pb6 build
 
 The version string comes from `TOOLKIT_VERSION` in the patched `Makefile`: the
 firmware names itself after the toolkit release, so `status` and the Bluetooth
-device info show `v0.1-toolkit-1.4.0` (upstream base, then the toolkit
+device info show `v0.1-toolkit-1.5.0` (upstream base, then the toolkit
 version) instead of the git description, which was the same for every build
 here. The result is `<BUILD_DIR>/badgemagic-ch582.bin`, and a clean checkout
 with the patches builds byte-identical copies of the files in `firmware/`.
@@ -701,7 +713,7 @@ Flash it with `badgetool.py flash path/to/badgemagic-ch582.bin`.
 |---|---|---|---|
 | Legacy upload | 64-byte reports | the packet as is, unpadded | service `fee0`, characteristic `fee1`, 16-byte writes |
 | `ng` commands | `'N' 'G' len16 payload` in 64-byte reports | the same frames as a byte stream, no padding | service `f055`: write `f057`, notify `f056` |
-| Replies (`STA`, `BAT`, `PIN`) | 64-byte IN report | 64 bytes on the port | not yet (`PIN`: never, it is USB only) |
+| Replies (`STA`, `BAT`, `SLT`, `PIN`) | 64-byte IN report | 64 bytes on the port | `f056` notifications from 1.5.0 (`PIN`: never, it is USB only) |
 
 Over serial the `ng` frames are a plain byte stream, packed back to back and
 split across USB packets any way the host likes, with the `STA` and `BAT`
@@ -711,10 +723,23 @@ the baud rate, so any setting works.
 `ng` commands are next packet (0), power (1), stream set (2), stream bitmap
 (3), BLE settings (4), splash screen upload (5), save (6), load defaults (7)
 and misc (8). The misc functions are splash speed, brightness, set time,
-battery reply `BAT`, status reply `STA`, charging screen seconds, and over USB
+battery reply `BAT`, status reply `STA`, charging screen seconds, over USB
 only: security on and off, the PIN (set it, or read the `PIN` reply with no
-argument) and forget bonds. The `PIN` reply is `'P' 'I' 'N'`, the PIN as u32
-little endian, security on, and the number of bonds.
+argument) and forget bonds, and since 1.5.0 show slot (9). The `PIN` reply is
+`'P' 'I' 'N'`, the PIN as u32 little endian, security on, and the number of
+bonds.
+
+Show slot takes the slot number 0 to 7 and leaves the clock, stopwatch, menu or
+BT-PAIRING for the slots; with no argument it only asks. Either way it answers
+`'S' 'L' 'T'`, the result (0 = done, `0xff` = slot empty, `0xfc` = busy with a
+game, a stream or switched off) and a byte with bit N set for every filled
+slot. That reply exists because USB has no ack for `ng` commands.
+
+Over Bluetooth, the 64-byte replies arrive as `f056` notifications, followed
+by the 1-byte ack every `ng` command gets. The `fastble` builds (MTU 96) send a
+reply in one piece; with a smaller MTU it comes in equal parts of at least 2
+bytes, so a client tells parts from acks by their length and joins them until
+it has 64 bytes.
 
 With security on, the characteristics `fee1`, `f057` and `f056` answer ATT
 error 5 (insufficient authentication) until the link is paired with the PIN.
@@ -745,18 +770,16 @@ renaming a badge keeps it compatible with the app.
 - The Bluetooth PIN on an iPhone and from Linux (`bluetoothctl`) with security
   on. Tested so far: `pb6-fastble` from Windows, Android and the app, and `pb6`
   (legacy pairing) from Windows.
-- Status and battery over BLE: those replies currently go out over USB (HID and
-  serial) only. Sending them as `f056` notifications would give Bluetooth the
-  full `status` (voltage, clock, settings) instead of just the battery
-  percentage.
 - Smoother BLE streaming: frames arrive on the connection-interval grid
   (Windows picks 30 ms), so streams at 15 or 20 fps jitter by a slot now and
   then. A 7.5 to 15 ms interval would smooth that out, at more battery cost
   while connected.
 - The battery cost of always-on Bluetooth is not measured yet.
-- Remote mode switching: a command to switch between clock, stopwatch, slots
-  (or one specific slot) and menu from the PC, over USB and BLE. Today only the
-  buttons can do that.
+- Remote mode switching beyond slots: `slot N` brings the badge back to the
+  slots from anywhere, but switching to the clock, stopwatch or menu from the
+  PC still needs the buttons.
+- Bluetooth replies on the standard builds (MTU 64) come in two parts; that
+  path is tested with a simulated badge only, not on hardware.
 - The clock drifts a lot, because the badge has no 32 kHz crystal and the clock
   runs on the chip's internal RC oscillator. Measured on one badge: about 10 %
   (1 s every 10 s), sometimes slow, sometimes fast, so after a few days without

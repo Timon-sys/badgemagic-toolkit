@@ -107,6 +107,11 @@ label.chk { display: inline-flex; gap: 4px; align-items: center; }
       <button id="btnSend" class="primary" disabled>Send to badge</button>
     </div>
     <div id="slots"></div>
+    <div class="row" id="showRow" style="margin-top:10px; display:none">
+      <span class="hint">Show on the badge now:</span>
+      <span class="seg" id="showSlot"></span>
+      <span class="hint grow" id="showHint"></span>
+    </div>
   </section>
 
   <section class="card">
@@ -164,6 +169,7 @@ const COLS = 44, ROWS = 11;
 const VID = 0x0416, PID = 0x5020;
 const CMD_POWER = 1, CMD_STREAM_SET = 2, CMD_STREAM_BM = 3, CMD_BLE = 4, CMD_SAVE = 6, CMD_MISC = 8;
 const MISC_SPLASH = 0, MISC_BRIGHTNESS = 1, MISC_TIME = 2, MISC_BATTERY = 3, MISC_STATUS = 4;
+const MISC_SLOT = 9;  // firmware 1.5.0: show slot N now / which slots are filled
 const MISC_SECURITY = 6, MISC_PIN = 7, MISC_FORGET_BONDS = 8;  // firmware 1.4.0, USB only
 const MODES = ["menu", "slots", "BT download", "clock", "game", "power off"];
 const SLOT_MODES = ["left", "right", "up", "down", "center", "fast", "drop", "curtain", "laser"];
@@ -283,7 +289,8 @@ function timePayload() {
 const NG_NAMES = { 1: p => ["power off", "power ?", "reboot"][p[1]] || "power", 2: p => p[1] ? "live off" : "live on",
   3: () => "live frame", 4: p => p[1] ? "ble name" : "ble always-on", 6: () => "save",
   8: p => ["splash", "brightness", "set time", "battery?", "status?", "charging scr",
-           "security", p.length > 2 ? "set pin" : "pin?", "forget bonds"][p[1]] || "misc" };
+           "security", p.length > 2 ? "set pin" : "pin?", "forget bonds",
+           p.length > 2 ? "show slot " + (p[2] + 1) : "slots?"][p[1]] || "misc" };
 const ngName = p => (NG_NAMES[p[0]] || (() => "cmd " + p[0]))(p);
 
 const traffic = {
@@ -323,6 +330,19 @@ setInterval(() => {
 
 // Both USB transports send the same ng frames and get the same 64-byte replies
 // back; only how the bytes leave and arrive differs, so that part lives here.
+// the 64-byte 'STA' reply, layout documented above cfg_status() in ngctrl.c
+function parseStatus(r) {
+  const v = new DataView(r.buffer, r.byteOffset, r.byteLength);
+  const str = (a, b) => new TextDecoder().decode(r.subarray(a, b)).split("\0")[0];
+  const y = v.getUint16(30, true), p2 = n => String(n).padStart(2, "0");
+  return {
+    firmware: str(44, r[3] >= 2 ? 63 : 64), bleAlwaysOn: !!r[4], brightness: r[5], splashMs: v.getUint16(6, true),
+    bleName: str(10, 30), time: `${y}-${p2(r[32])}-${p2(r[33])} ${p2(r[34])}:${p2(r[35])}:${p2(r[36])}`,
+    mv: v.getUint16(39, true), charging: !!r[41], mode: MODES[r[42]] ?? String(r[42]), streaming: !!(r[43] & 1),
+    bleSecurity: !!r[9],
+  };
+}
+
 class UsbLink {
   async ng(payload) {
     const p = Uint8Array.from(payload), f = new Uint8Array(4 + p.length);
@@ -332,7 +352,7 @@ class UsbLink {
   // a reply, 64 bytes starting with the three letters that say what it is
   gotReply(d) {
     const magic = String.fromCharCode(d[0], d[1], d[2]);
-    rx(d, { STA: "status", BAT: "battery", PIN: "pin" }[magic] || "report");
+    rx(d, { STA: "status", BAT: "battery", PIN: "pin", SLT: "slots" }[magic] || "report");
     const w = this.waiter;
     if (w && magic === w.magic) { this.waiter = null; w.done(d); }
   }
@@ -341,22 +361,20 @@ class UsbLink {
       const t = setTimeout(() => {
         this.waiter = null;
         const e = new Error("no reply (needs the patched firmware)"); e.name = "TimeoutError"; rej(e);
-      }, 1000);
+      }, this.replyMs || 1000);
       this.waiter = { magic, done: d => { clearTimeout(t); res(d); } };
       this.ng(payload).catch(e => { clearTimeout(t); this.waiter = null; rej(e); });
     });
   }
   async status() {
-    const r = await this.query([CMD_MISC, MISC_STATUS], "STA");
-    const v = new DataView(r.buffer, r.byteOffset, r.byteLength);
-    const str = (a, b) => new TextDecoder().decode(r.subarray(a, b)).split("\0")[0];
-    const y = v.getUint16(30, true), p2 = n => String(n).padStart(2, "0");
-    return {
-      firmware: str(44, 64), bleAlwaysOn: !!r[4], brightness: r[5], splashMs: v.getUint16(6, true),
-      bleName: str(10, 30), time: `${y}-${p2(r[32])}-${p2(r[33])} ${p2(r[34])}:${p2(r[35])}:${p2(r[36])}`,
-      mv: v.getUint16(39, true), charging: !!r[41], mode: MODES[r[42]] ?? String(r[42]), streaming: !!(r[43] & 1),
-      bleSecurity: !!r[9], ...await this.pinInfo(),
-    };
+    return { ...parseStatus(await this.query([CMD_MISC, MISC_STATUS], "STA")), ...await this.pinInfo() };
+  }
+  // slot 0-7: show it now; no slot: only ask. -> { result: 0 | "empty" | "busy", filled: [0-based] }
+  // Throws TimeoutError on firmware before 1.5.0.
+  async showSlot(slot) {
+    const r = await this.query([CMD_MISC, MISC_SLOT, ...(slot == null ? [] : [slot])], "SLT");
+    return { result: { 0: 0, 0xff: "empty", 0xfc: "busy" }[r[3]] ?? r[3],
+             filled: [0, 1, 2, 3, 4, 5, 6, 7].filter(i => r[4] >> i & 1) };
   }
   // firmware before 1.4.0 doesn't answer: no PIN fields then
   // (asked once per link, so the keep-alive ping doesn't wait 1 s each time)
@@ -459,7 +477,7 @@ const PIN_HINT = "the badge wants its Bluetooth PIN: pair this device in its Blu
                  "(Windows shows an “Add device” notification), then reconnect";
 const dvBytes = v => new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
 class BleLink {
-  constructor(dev) { this.dev = dev; this.kind = "ble"; }
+  constructor(dev) { this.dev = dev; this.kind = "ble"; this.waiter = null; this.replyMs = 2500; }
   get name() { return this.dev.name || "BLE badge"; }
   // connect + service discovery under one deadline: right after a reboot Windows can
   // stall in getPrimaryService forever, not just in connect()
@@ -476,13 +494,22 @@ class BleLink {
       refreshUi();
     });
   }
-  // f056 notifies the 1-byte ng status after each command: shows up as RX in the monitor
+  // f056 notifies the 1-byte ng status after each command (shows up as RX in the
+  // monitor) and, from firmware 1.5.0, the 64-byte replies: in one piece on fast-ble
+  // builds, in equal parts of 2+ bytes with a smaller MTU
   async _listen() {
     if (!this.ngc) return;
     const n = await this.ngc.service.getCharacteristic(U(0xf056));
-    n.addEventListener("characteristicvaluechanged", e =>
-      rx(dvBytes(e.target.value), "ng ack"));
+    this.rbuf = [];
+    n.addEventListener("characteristicvaluechanged", e => {
+      const d = new Uint8Array(dvBytes(e.target.value));
+      if (d.length < 2) return rx(d, "ng ack");
+      if (!this.rbuf.length && !/^[A-Z]{3}$/.test(String.fromCharCode(d[0], d[1], d[2]))) return rx(d, "notify");
+      this.rbuf.push(...d);
+      if (this.rbuf.length >= 64) { const r = Uint8Array.from(this.rbuf.slice(0, 64)); this.rbuf = []; this.gotReply(r); }
+    });
     await withTimeout(n.startNotifications(), 5000, "notify");
+    this.listening = true;
   }
   async _open() {
     const g = await this.dev.gatt.connect();
@@ -516,7 +543,13 @@ class BleLink {
     }
     if (this.pinNeeded) { this.pinNeeded = false; refreshUi(); }  // paired in the meantime
   }
+  // the full status from firmware 1.5.0 on; before that (no reply on f056) only the
+  // battery level. Asked until the first miss, unless an answer came on this link before.
   async status() {
+    if (this.listening && !this.noSta) {
+      try { const s = parseStatus(await this.query([CMD_MISC, MISC_STATUS], "STA")); this.gotSta = true; return s; }
+      catch (e) { if (e.name !== "TimeoutError" || this.gotSta) throw e; this.noSta = true; }
+    }
     const s = { firmware: this.fw };
     if (this.batt) {
       tx([], "read battery");
@@ -537,6 +570,7 @@ class BleLink {
   }
   yearByte() { return new Date().getFullYear() & 0xff; }
 }
+for (const m of ["gotReply", "query", "showSlot"]) BleLink.prototype[m] = UsbLink.prototype[m];
 
 // ---------------------------------------------------------------- state
 
@@ -545,6 +579,7 @@ const KIND_SHORT = { usb: "USB", serial: "COM", ble: "BT" };
 const onUsb = l => l && l.kind !== "ble";   // HID or serial: a cable, not Bluetooth
 
 let link = null, custom = false, status = {}, busy = Promise.resolve();
+let filled = null;             // filled slot numbers (0-based) from the 'SLT' reply; null = unknown / old firmware
 let rebootPending = false;
 let lastDev = null;            // {kind, dev} of the badge to reconnect to
 let isLost = false, reconnecting = false, attaching = false, inFlight = 0, misses = 0;
@@ -577,6 +612,8 @@ async function attach(l) {
     lastDev = { kind: l.kind, dev: l.dev };
     try { status = await l.status(); custom = l.kind === "ble" ? !!l.ngc : true; }
     catch { status = {}; custom = false; }
+    filled = null;
+    if (custom) try { filled = (await l.showSlot()).filled; } catch {}
     log(`connected: ${l.name} over ${KIND[l.kind]}${custom ? "" : " (text/image only)"}`);
     if (l.kind === "ble")
       l.dev.addEventListener("gattserverdisconnected", () => { if (link === l) lost("Bluetooth link dropped"); }, { once: true });
@@ -775,9 +812,14 @@ function refreshUi() {
     if (s.bleName) st.push(stat("Bluetooth name", esc(s.bleName)));
     if (s.firmware) st.push(stat("firmware", esc(s.firmware)));
     if (link.kind === "ble" && link.pinNeeded) st.push(stat("Bluetooth PIN", '<small>needed: pair this device first</small>'));
-    else if (link.kind === "ble" && custom) st.push(stat("more", '<small>clock & settings show over USB</small>'));
+    else if (link.kind === "ble" && custom && s.mv == null) st.push(stat("more", '<small>clock & settings over Bluetooth need firmware 1.5.0</small>'));
   }
   $("stats").innerHTML = st.join("");
+  $("showRow").style.display = !link || !custom || filled == null ? "none" : "";  // .row sets display, so not `hidden`
+  $("showSlot").querySelectorAll("button").forEach(b => {
+    b.disabled = !filled || !filled.includes(+b.dataset.v);
+    b.title = b.disabled ? "empty" : "show slot " + (+b.dataset.v + 1);
+  });
   setSeg("bright", s.brightness);
   setSeg("splash", s.splashMs == null ? null : s.splashMs ? 1 : 0);
   setSeg("bleOn", s.bleAlwaysOn == null ? null : s.bleAlwaysOn ? 1 : 0);
@@ -835,6 +877,20 @@ $("btnPinRnd").onclick = () => setPin(crypto.getRandomValues(new Uint32Array(1))
 $("btnForget").onclick = () => {
   if (confirm("Forget every paired device? They have to pair again with the PIN."))
     pinCommand("paired devices forgotten", [CMD_MISC, MISC_FORGET_BONDS]);
+};
+for (let i = 0; i < 8; i++) $("showSlot").insertAdjacentHTML("beforeend", `<button data-v="${i}">${i + 1}</button>`);
+$("showSlot").onclick = e => {
+  const v = e.target.dataset.v;
+  if (v == null) return;
+  run("show slot", async l => {
+    const r = await l.showSlot(+v);
+    filled = r.filled;
+    $("showHint").textContent = r.result === 0 ? `slot ${+v + 1}; the button steps on from there`
+      : r.result === "empty" ? `slot ${+v + 1} is empty`
+      : r.result === "busy" ? "busy: a game, a live picture or switched off" : "badge said " + r.result;
+    if (r.result === 0) { try { status = await l.status(); } catch {} }
+    refreshUi();
+  });
 };
 $("btnTime").onclick = () => run("time", async l => { await l.ng(timePayload()); log("clock set"); });
 $("btnReboot").onclick = () => run("reboot", rebootAndRestore);
@@ -921,6 +977,7 @@ $("btnSend").onclick = () => run("upload", async l => {
   const data = slots.map(s => ({ ...s, data: slotData(s) }));
   await l.upload(legacyPacket(data, l.yearByte()));
   log(`sent ${data.length} message${data.length > 1 ? "s" : ""}`);
+  if (filled != null) { await sleep(500); try { filled = (await l.showSlot()).filled; } catch {} refreshUi(); }
 });
 
 // ---------------------------------------------------------------- LED preview
