@@ -1440,6 +1440,52 @@ def menu_text():
                 border=input("border? y/N: ").strip().lower() == "y"))
 
 
+def menu_slot():
+    b = open_one(ns())
+    try:
+        _, filled = b.show_slot()
+    except RuntimeError as e:
+        print(e if "no reply" not in str(e) else "this needs firmware 1.5.0 or later ('flash firmware')")
+        return
+    finally:
+        b.close()
+    if not filled:
+        print("no slots filled yet - upload something first")
+        return
+    have = [str(i + 1) for i in filled]
+    cmd_slot(ns(n=int(ask(f"which slot ({', '.join(have)}): ", have))))
+
+
+def menu_image(live=False):
+    path = input("image path: ").strip('" ')
+    invert = input("light pixels light up instead of dark ones? y/N: ").strip().lower() == "y"
+    if live:
+        cmd_stream(ns(what=path, invert=invert))
+    else:
+        cmd_image(ns(file=path, invert=invert, preview=False))
+
+
+def menu_pin():
+    if SESSION["ble"] is not None:
+        print("the PIN can only be shown or changed over USB")
+        return
+    new = input("new 6-digit PIN, 'random', or enter to just show it: ").strip().lower()
+    cmd_pin(ns(pin=new or None))
+
+
+def menu_pairing(fn):
+    """pair/unpair open their own Bluetooth link, which can't coexist with the
+    menu's: drop the menu's link for the duration and connect again after."""
+    s = SESSION["ble"]
+    if s is not None:
+        s.close(force=True)
+    try:
+        fn(ns(ble=s.address if s is not None else "scan"))
+    finally:
+        if s is not None:
+            SESSION["ble"] = BleBadge(s.address, keep=True)
+
+
 def menu():
     if not pick_channel():
         return
@@ -1451,27 +1497,42 @@ def menu():
 
 
 def _menu():
+    on_off = ("on", "off")
+    # a str entry is a heading; every other entry is (label, action)
     items = [
+        "Info",
         ("status", lambda: cmd_status(ns())),
         ("battery (live, Ctrl+C to stop)", lambda: cmd_battery(ns(watch=2))),
         ("set clock to PC time", lambda: cmd_time(ns())),
-        ("brightness", lambda: cmd_brightness(ns(level=int(ask("level 0-3: ", "0123"))))),
-        ("Bluetooth always-on", lambda: cmd_ble(ns(state=ask("on/off: ", ("on", "off"))))),
-        ("Bluetooth name", lambda: cmd_name(ns(name=input("new name (max 20): ").strip()))),
-        ("startup animation", lambda: cmd_splash(ns(state=ask("on/off: ", ("on", "off"))))),
-        ("charging screen at boot", lambda: cmd_charging(ns(seconds=int(ask(
-            "seconds 0-60 (0 = boot straight to the slots): ", tuple(map(str, range(61)))))))),
+        "Slots and pictures",
+        ("show slot N now", menu_slot),
         ("upload text (replaces all slots)", menu_text),
         ("upload config.toml", menu_upload),
-        ("upload image", lambda: cmd_image(ns(file=input("image path: ").strip('" '),
-                                              invert=False, preview=False))),
+        ("upload image (replaces all slots)", menu_image),
+        ("live picture (slots untouched)", lambda: menu_image(live=True)),
         ("full white test screen", lambda: cmd_stream(ns(what="white"))),
         ("stop streaming", lambda: cmd_stream(ns(what="off"))),
+        "Settings",
+        ("brightness", lambda: cmd_brightness(ns(level=int(ask("level 0-3: ", "0123"))))),
+        ("Bluetooth always-on", lambda: cmd_ble(ns(state=ask("on/off: ", on_off)))),
+        ("Bluetooth name", lambda: cmd_name(ns(name=input("new name (max 20): ").strip()))),
+        ("startup animation", lambda: cmd_splash(ns(state=ask("on/off: ", on_off)))),
+        ("charging screen at boot", lambda: cmd_charging(ns(seconds=int(ask(
+            "seconds 0-60 (0 = boot straight to the slots): ", tuple(map(str, range(61)))))))),
+        "Bluetooth PIN (changes over USB only)",
+        ("show / set the PIN", menu_pin),
+        ("PIN required on/off", lambda: cmd_security(ns(state=ask("on/off: ", on_off)))),
+        ("forget all paired devices", lambda: ask("every device has to pair again - sure? y/n: ", "yn") == "y"
+            and cmd_forget(ns())),
+        ("pair this PC (Windows)", lambda: menu_pairing(cmd_pair)),
+        ("unpair this PC (Windows)", lambda: menu_pairing(cmd_unpair)),
+        "Power and firmware",
         ("reboot", lambda: cmd_reset(ns())),
         ("power off", lambda: cmd_off(ns())),
         ("flash firmware", lambda: cmd_flash(ns(firmware=ask("build (" + " / ".join(FIRMWARE) + "): ",
                                                             tuple(FIRMWARE))))),
     ]
+    actions = [it for it in items if not isinstance(it, str)]
     while True:
         print()
         if SESSION["ble"] is not None:
@@ -1480,15 +1541,23 @@ def _menu():
         else:
             cmd_list(ns())
         print()
-        for i, (label, _) in enumerate(items, 1):
-            print(f"{i:2d}  {label}")
-        print(" q  quit")
-        c = input("> ").strip().lower()
+        n = 0
+        for it in items:
+            if isinstance(it, str):
+                print(f"\n    {it}")
+                continue
+            n += 1
+            print(f"{n:2d}  {it[0]}")
+        print("\n q  quit")
+        try:
+            c = input("> ").strip().lower()
+        except EOFError:  # Ctrl+Z / Ctrl+D, or piped input ran out
+            return
         if c in ("q", "quit", "exit", ""):
             return
-        if c.isdigit() and 1 <= int(c) <= len(items):
+        if c.isdigit() and 1 <= int(c) <= len(actions):
             try:
-                items[int(c) - 1][1]()
+                actions[int(c) - 1][1]()
             except SystemExit as e:
                 print(e)
             except KeyboardInterrupt:
