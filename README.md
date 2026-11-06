@@ -21,8 +21,9 @@ ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
   the long one.
 - `badgetool.py` drives the badges from a PC over USB (HID or serial) and over
   Bluetooth: the clock, brightness, Bluetooth name, always-on mode and PIN, the
-  battery voltage, text and image uploads, live streaming and firmware
-  flashing. [What works over which connection](#what-works-over-which-connection)
+  battery voltage, text and image uploads, jumping to a slot, live streaming
+  and firmware flashing, as commands or from an interactive menu.
+  [What works over which connection](#what-works-over-which-connection)
   has the details.
 - `ls32/ls32_image.py` shows static images on the older LS32 badges.
 
@@ -57,7 +58,8 @@ ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
   switching off. It [drifts a lot](#ideas--not-done-yet), so set it now and
   then with `badgetool.py time`.
 - The charging screen shows the battery voltage and gets out of the way after
-  5 seconds instead of waiting for a button press forever. With the startup
+  5 seconds instead of waiting for a button press forever (or waits for one,
+  if you prefer: `badgetool.py charging-screen button`). With the startup
   animation off as well, the badge boots straight to your slots.
 - Calmer buttons: the button nearest USB steps one slot per press instead of
   starting an automatic cycle, a long press on the other button changes
@@ -367,8 +369,9 @@ Over USB it is about 60 fps regardless.
 ## Web panel (`web/`)
 
 `web/index.html` is a control panel that runs in the browser, with no Python
-needed: open it in Chrome or Edge and connect over USB (WebHID, desktop only)
-or Bluetooth (Web Bluetooth, desktop and Android). It does text slots with a
+needed: open it in Chrome or Edge and connect over USB (WebHID, desktop only),
+USB serial (Web Serial, desktop; firmware 1.3.0 or later) or Bluetooth (Web
+Bluetooth, desktop and Android). It does text slots with a
 live preview of the scroll modes, a 44×11 draw pad that can mirror itself live
 onto the badge, images, the settings, reboot and power off. A keep-alive ping
 notices a lost badge within a few seconds and reconnects, and a TX/RX monitor
@@ -380,9 +383,9 @@ Both browser APIs need a secure context: `localhost`, a `file://` page or
 `https://`. The panel is a single file, so to use it from a phone, put
 `index.html` on any web server that has HTTPS. A self-signed certificate is
 fine: click through the warning once and Web Bluetooth works. Factory-firmware
-badges get text and images only. Over Bluetooth, firmware older than 1.5.0
-shows only the battery percentage and firmware version, as `badgetool.py`
-does. Below the messages, "Show on the badge now" jumps to a slot (empty slots
+badges get text and images only. Over Bluetooth, firmware 1.5.0 shows the full
+status (voltage, clock, settings) like USB does; older firmware shows only the
+battery percentage and firmware version, as `badgetool.py` does. Below the messages, "Show on the badge now" jumps to a slot (empty slots
 are greyed out; firmware 1.5.0 and later).
 
 `index.html` is built from `panel.src.html` by `python build.py`, which copies
@@ -465,7 +468,7 @@ otherwise.
 | `badgemagic-ch582-2key.bin` | `normal` | normal | standard | ran on a PB6 board (all but line T); upstream-wired board untested |
 | `badgemagic-ch582-2key-pb6.bin` | `pb6` | PB6 | standard | yes: USB HID, serial and Bluetooth (every command; streaming 4 fps, 150/150 frames); v1.4.0 with the PIN on: every command over USB and Bluetooth, legacy pairing from Windows |
 | `badgemagic-ch582-2key-fastble.bin` | `normal-fastble` | normal | fast | same code as `pb6-fastble` but the LED pin; upstream-wired board untested |
-| `badgemagic-ch582-2key-pb6-fastble.bin` | `pb6-fastble` | PB6 | fast | yes: USB HID, serial and Bluetooth (every command; streaming 20 to 30 fps, 13 to 23 fps with nearly every LED lit, 300/300 frames); the phone app on two badges with v1.2.1; v1.4.0 with the PIN on: every command over USB HID, serial and Bluetooth, pairing from Windows, Android and the app |
+| `badgemagic-ch582-2key-pb6-fastble.bin` | `pb6-fastble` | PB6 | fast | yes: USB HID, serial and Bluetooth (every command; streaming 20 to 30 fps, 13 to 23 fps with nearly every LED lit, 300/300 frames); the phone app on two badges with v1.2.1; v1.4.0 with the PIN on: every command over USB HID, serial and Bluetooth, pairing from Windows, Android and the app; v1.5.0: 109-check regression of every command over USB HID, serial and Bluetooth, plus the web panel over serial and Bluetooth |
 
 The `normal` builds ran for weeks on my badges (an earlier version), and
 everything worked except the LEDs on line T, because both my badges are wired
@@ -645,7 +648,8 @@ storage, and the screens and buttons.
 #### Screens, power and buttons
 
 - Stuck on the charging animation when plugged in: the screen now leaves after
-  5 seconds (adjustable with `badgetool.py charging-screen`) or on a key press.
+  5 seconds (adjustable with `badgetool.py charging-screen`, where `button`
+  brings back the wait for a key press) or on a key press.
   It shows the battery voltage from the calibrated ADC instead of an animation,
   and the config is loaded before this screen, so a reboot while charging no
   longer saves zeros.
@@ -716,8 +720,8 @@ Flash it with `badgetool.py flash path/to/badgemagic-ch582.bin`.
 | Replies (`STA`, `BAT`, `SLT`, `PIN`) | 64-byte IN report | 64 bytes on the port | `f056` notifications from 1.5.0 (`PIN`: never, it is USB only) |
 
 Over serial the `ng` frames are a plain byte stream, packed back to back and
-split across USB packets any way the host likes, with the `STA` and `BAT`
-replies on the same port. Legacy uploads work over serial too. The port ignores
+split across USB packets any way the host likes, with the replies on the same
+port. Legacy uploads work over serial too. The port ignores
 the baud rate, so any setting works.
 
 `ng` commands are next packet (0), power (1), stream set (2), stream bitmap
@@ -751,8 +755,8 @@ seconds, and the version string before it is cut to 19 characters, so readers
 of layout 1 (which stop at its NUL) keep working. The charging screen itself is
 a setting from 0 to 254 seconds in the firmware, default 5, where 0 skips it
 and 255 waits for a key press (before 1.5.0, 255 meant 255 seconds);
-`badgetool.py charging-screen` takes 0 to 60 or `button`. Settings saved by older builds
-are migrated when you update, so nothing resets.
+`badgetool.py charging-screen` takes 0 to 60 or `button`. Settings saved by
+older builds are migrated when you update, so nothing resets.
 
 The Badge Magic app finds badges by the advertised service `0xFEE0`, so
 renaming a badge keeps it compatible with the app.
@@ -789,9 +793,9 @@ renaming a badge keeps it compatible with the app.
   `badgetool.py time` when you need it; fixing it properly would mean
   recalibrating periodically or correcting the RTC in software.
 - Upstream pull requests: several fixes (config storage, the HID reply bug, the
-  USB serial port, the `splash` crash over Bluetooth, switching off while
-  charging, `LED_T_PB6`, the blips, the charging screen) would be useful for
-  FOSSASIA too.
+  USB serial port, the `splash` crash over Bluetooth, the slot memory leak,
+  switching off while charging, `LED_T_PB6`, the blips, the charging screen)
+  would be useful for FOSSASIA too.
 
 ## Credits and licences
 
