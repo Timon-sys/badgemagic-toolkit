@@ -1076,7 +1076,7 @@ index ca7d0c6..0e10031 100644
  #endif /* __LEGACYCTRL_H__ */
 \ No newline at end of file
 diff --git a/src/main.c b/src/main.c
-index 7b4b3c6..dc0cce3 100644
+index 7b4b3c6..5ccec2d 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -26,6 +26,7 @@
@@ -1501,7 +1501,7 @@ index 7b4b3c6..dc0cce3 100644
      btn_onOnePress(KEY1, menu_up);
      btn_onOnePress(KEY2, menu_down);
  #if HW_KEY_COUNT == 4
-@@ -766,23 +848,63 @@ void return_to_menu()
+@@ -766,23 +848,66 @@ void return_to_menu()
      disp_menu();
  }
  
@@ -1537,7 +1537,9 @@ index 7b4b3c6..dc0cce3 100644
 +
 +/* The boot charging screen holds up everything after it, BLE included, so
 + * it gives up on its own after badge_cfg.charging_screen_s (a key press still
-+ * skips it). 0 skips it altogether. */
++ * skips it). 0 skips it altogether, 255 waits for a key press like upstream
++ * did (BLE stays off until then). */
++#define CHARGING_SCREEN_UNTIL_KEY 255
  static void disp_charging()
  {
  	int blink = 0;
@@ -1545,9 +1547,10 @@ index 7b4b3c6..dc0cce3 100644
 -		btn_tick();
 -		int percent = batt_raw2percent(batt_raw());
 +	int ms = badge_cfg.charging_screen_s * 1000;
++	int forever = badge_cfg.charging_screen_s == CHARGING_SCREEN_UNTIL_KEY;
 +	if (ms == 0)
 +		return;
-+	for (int shown = 0; shown < ms; shown += 500) {
++	for (int shown = 0; forever || shown < ms; shown += 500) {
 +		int raw = batt_raw();
 +		int percent = batt_raw2percent(raw);
  
@@ -1573,7 +1576,7 @@ index 7b4b3c6..dc0cce3 100644
  			DelayMs(500);
  			return;
  		}
-@@ -802,18 +924,79 @@ void reload_bmlist()
+@@ -802,18 +927,79 @@ void reload_bmlist()
  	load_bmlist();
  }
  
@@ -1655,7 +1658,7 @@ index 7b4b3c6..dc0cce3 100644
      fb_puts_small("BLUETOOTH", 9, 4, 0);
      fb_puts_small("OFF", 3, 4, 6);
  }
-@@ -827,9 +1010,12 @@ void handle_after_rx()
+@@ -827,9 +1013,12 @@ void handle_after_rx()
          tmos_stop_task(common_taskid, STOPWATCH_TICK);
          sw_state = SW_STOPPED;
          clock_active = 0;
@@ -1671,7 +1674,7 @@ index 7b4b3c6..dc0cce3 100644
      }
  }
  
-@@ -840,12 +1026,15 @@ int main()
+@@ -840,12 +1029,15 @@ int main()
  	debug_init();
  	PRINT("\nDebug console is on UART%d\n", DEBUG);
  
@@ -1690,7 +1693,7 @@ index 7b4b3c6..dc0cce3 100644
  	TMR0_ITCfg(ENABLE, TMR0_3_IT_CYC_END);
  	PFIC_EnableIRQ(TMR0_IRQn);
  
-@@ -863,19 +1052,34 @@ int main()
+@@ -863,19 +1055,34 @@ int main()
  #endif
  
  	power_init();
@@ -1727,7 +1730,7 @@ index 7b4b3c6..dc0cce3 100644
  
  	spawn_tasks();
  	btn_init_task();
-@@ -887,10 +1091,12 @@ int main()
+@@ -887,10 +1094,12 @@ int main()
  	pong_init();
  	stop_all_animation();
  
@@ -1742,7 +1745,7 @@ index 7b4b3c6..dc0cce3 100644
  	}
  }
  
-@@ -899,20 +1105,36 @@ __HIGH_CODE
+@@ -899,20 +1108,36 @@ __HIGH_CODE
  void TMR0_IRQHandler(void)
  {
  	static int i;
@@ -1785,7 +1788,7 @@ index 7b4b3c6..dc0cce3 100644
 +}
 \ No newline at end of file
 diff --git a/src/ngctrl.c b/src/ngctrl.c
-index b5a687e..3d56dbb 100644
+index b5a687e..cf2907d 100644
 --- a/src/ngctrl.c
 +++ b/src/ngctrl.c
 @@ -4,10 +4,21 @@
@@ -1835,11 +1838,12 @@ index b5a687e..3d56dbb 100644
  	if (ms < SPLASH_MIN_SPEED_T)
  		return -1;
  
-@@ -148,6 +167,14 @@ static uint8_t cfg_splash_speed(uint8_t *val, uint16_t len)
+@@ -148,6 +167,15 @@ static uint8_t cfg_splash_speed(uint8_t *val, uint16_t len)
  	return 0;
  }
  
-+/* Seconds the boot charging screen stays up, 0 = skip it. Save to keep. */
++/* Seconds the boot charging screen stays up, 0 = skip it, 255 = until a key
++ * press. Save to keep. */
 +static uint8_t cfg_charging_screen(uint8_t *val, uint16_t len)
 +{
 +	if (len < 1) return -2;
@@ -1850,7 +1854,7 @@ index b5a687e..3d56dbb 100644
  static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
  {
  	PRINT(__func__);
-@@ -161,6 +188,132 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
+@@ -161,6 +189,132 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
  	return 0;
  }
  
@@ -1983,7 +1987,7 @@ index b5a687e..3d56dbb 100644
  uint8_t misc(uint8_t *val, uint16_t len)
  {
  	PRINT(__func__);
-@@ -170,6 +323,14 @@ uint8_t misc(uint8_t *val, uint16_t len)
+@@ -170,6 +324,14 @@ uint8_t misc(uint8_t *val, uint16_t len)
  	const uint8_t (*misc_cmd[])(uint8_t *, uint16_t) = {
  		cfg_splash_speed,
  		cfg_led_brightness,
@@ -1998,7 +2002,7 @@ index b5a687e..3d56dbb 100644
  	};
  
  	uint8_t fn = val[0];
-@@ -194,6 +355,124 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
+@@ -194,6 +356,124 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
  
  #define CMD_LUT_LEN (sizeof(cmd_lut) / sizeof(cmd_lut[0]))
  

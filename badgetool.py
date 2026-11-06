@@ -41,6 +41,7 @@ one with -i N (see 'list').
 import argparse
 import asyncio
 import datetime
+import io
 import os
 import shutil
 import struct
@@ -76,6 +77,7 @@ CMD_SAVE, CMD_MISC = 6, 8
 MISC_SPLASH, MISC_BRIGHTNESS, MISC_TIME, MISC_BATTERY, MISC_STATUS, MISC_CHARGING = 0, 1, 2, 3, 4, 5
 MISC_SECURITY, MISC_PIN, MISC_FORGET_BONDS = 6, 7, 8  # firmware 1.4.0, USB only
 MISC_SLOT = 9  # firmware 1.5.0: show slot N / which slots are filled
+CHARGING_UNTIL_KEY = 255  # charging screen setting: wait for a button (firmware 1.5.0)
 MODES = ["menu", "slots", "BT download", "clock", "game", "power off"]
 
 
@@ -941,7 +943,7 @@ battery        {s['batt_mv']/1000:.3f} V  raw {s['batt_raw']}  {'charging' if s[
 brightness     {s['brightness']} / 3
 bluetooth      name "{s['ble_name']}", always-on {'yes' if s['ble_always_on'] else 'no'}, {sec}
 startup anim   {'off' if s['splash_ms'] == 0 else 'on'}
-charging scr   {'(needs firmware 1.3.0)' if s['charging_screen_s'] is None else 'off, boots straight to the slots' if s['charging_screen_s'] == 0 else str(s['charging_screen_s']) + ' s at boot'}""")
+charging scr   {'(needs firmware 1.3.0)' if s['charging_screen_s'] is None else charging_text(s['charging_screen_s'])}""")
 
 
 def cmd_battery(a):
@@ -1049,13 +1051,24 @@ def cmd_splash(a):
 
 
 def cmd_charging(a):
+    secs = CHARGING_UNTIL_KEY if str(a.seconds) == "button" else int(a.seconds)
+    if not (0 <= secs <= 60 or secs == CHARGING_UNTIL_KEY):
+        sys.exit("charging screen: 0-60 seconds, or 'button' to wait for a button press")
     b = open_one(a)
-    b.ng(bytes([CMD_MISC, MISC_CHARGING, a.seconds]))
+    b.ng(bytes([CMD_MISC, MISC_CHARGING, secs]))
     time.sleep(0.2)
     b.save()
     b.close()
-    print("charging screen " + ("off: the badge boots straight to the slots"
-                                if a.seconds == 0 else f"{a.seconds} s at boot") + ", saved")
+    print("charging screen " + charging_text(secs) + ", saved")
+
+
+def charging_text(secs):
+    if secs == 0:
+        return "off: the badge boots straight to the slots"
+    if secs == CHARGING_UNTIL_KEY:
+        return ("stays until a button press (firmware 1.5.0; older ones give up after 255 s); "
+                "Bluetooth is off until then")
+    return f"{secs} s at boot"
 
 
 def open_usb_pin(a):
@@ -1517,9 +1530,10 @@ def _menu():
         ("Bluetooth always-on", lambda: cmd_ble(ns(state=ask("on/off: ", on_off)))),
         ("Bluetooth name", lambda: cmd_name(ns(name=input("new name (max 20): ").strip()))),
         ("startup animation", lambda: cmd_splash(ns(state=ask("on/off: ", on_off)))),
-        ("charging screen at boot", lambda: cmd_charging(ns(seconds=int(ask(
-            "seconds 0-60 (0 = boot straight to the slots): ", tuple(map(str, range(61)))))))),
-        "Bluetooth PIN (changes over USB only)",
+        ("charging screen at boot", lambda: cmd_charging(ns(seconds=ask(
+            "seconds 0-60 (0 = boot straight to the slots), or 'button' (until a button press): ",
+            tuple(map(str, range(61))) + ("button",))))),
+        "Bluetooth PIN (USB only)",
         ("show / set the PIN", menu_pin),
         ("PIN required on/off", lambda: cmd_security(ns(state=ask("on/off: ", on_off)))),
         ("forget all paired devices", lambda: ask("every device has to pair again - sure? y/n: ", "yn") == "y"
@@ -1533,37 +1547,95 @@ def _menu():
                                                             tuple(FIRMWARE))))),
     ]
     actions = [it for it in items if not isinstance(it, str)]
+    listing = menu_columns(items)
+    last = None  # (label, output) of the previous command, shown under the list
     while True:
-        print()
+        os.system("cls" if os.name == "nt" else "clear")
         if SESSION["ble"] is not None:
-            addr = SESSION["ble"].address
-            print(f"Bluetooth: {addr}")
+            print(f"Bluetooth: {SESSION['ble'].address}")
         else:
             cmd_list(ns())
-        print()
-        n = 0
-        for it in items:
-            if isinstance(it, str):
-                print(f"\n    {it}")
-                continue
-            n += 1
-            print(f"{n:2d}  {it[0]}")
-        print("\n q  quit")
+        print("\n" + listing + "\n\n q  quit")
+        if last:
+            label, out = last
+            lines = out.rstrip("\n").splitlines() or ["(no output)"]
+            if len(lines) > MENU_OUTPUT_LINES:  # a long battery watch: keep the end
+                lines = ["..."] + lines[-MENU_OUTPUT_LINES:]
+            print(f"\n--- {label} " + "-" * max(3, 60 - len(label)))
+            print("\n".join(lines))
         try:
-            c = input("> ").strip().lower()
+            c = input("\n> ").strip().lower()
         except EOFError:  # Ctrl+Z / Ctrl+D, or piped input ran out
             return
-        if c in ("q", "quit", "exit", ""):
+        if c in ("q", "quit", "exit"):
             return
-        if c.isdigit() and 1 <= int(c) <= len(actions):
-            try:
-                actions[int(c) - 1][1]()
-            except SystemExit as e:
+        if not (c.isdigit() and 1 <= int(c) <= len(actions)):
+            last = None
+            continue
+        label, action = actions[int(c) - 1]
+        # the command prints live as usual (prompts included); the copy is what
+        # shows under the list once the screen is redrawn
+        tee = Tee(sys.stdout)
+        sys.stdout = tee
+        try:
+            action()
+        except SystemExit as e:
+            if e.code not in (None, 0):
                 print(e)
-            except KeyboardInterrupt:
-                print()
-            except Exception as e:
-                print("error:", e)
+        except KeyboardInterrupt:
+            print()
+        except EOFError:
+            return
+        except Exception as e:
+            print("error:", e)
+        finally:
+            sys.stdout = tee.real
+        last = (label, tee.buf.getvalue())
+
+
+MENU_OUTPUT_LINES = 25
+
+
+class Tee:
+    """stdout that also keeps a copy of everything written."""
+
+    def __init__(self, real):
+        self.real, self.buf = real, io.StringIO()
+
+    def write(self, s):
+        self.buf.write(s)
+        return self.real.write(s)
+
+    def flush(self):
+        self.real.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+def menu_columns(items):
+    """The menu in two columns when the terminal is wide enough (it no longer
+    fits on one screen otherwise), sections kept whole."""
+    blocks, n = [], 0
+    for it in items:
+        if isinstance(it, str):
+            blocks.append([f"    {it}"])
+        else:
+            n += 1
+            blocks[-1].append(f"{n:2d}  {it[0]}")
+    one = "\n\n".join("\n".join(b) for b in blocks)
+    left_w = max(len(line) for b in blocks for line in b) + 3
+    if shutil.get_terminal_size((80, 24)).columns < 2 * left_w:
+        return one
+    # split between sections where the taller column is shortest
+    size = [len(b) + 1 for b in blocks]
+    cut = min(range(1, len(blocks)), key=lambda k: max(sum(size[:k]), sum(size[k:])))
+    left = [line for b in blocks[:cut] for line in b + [""]]
+    right = [line for b in blocks[cut:] for line in b + [""]]
+    rows = max(len(left), len(right))
+    left += [""] * (rows - len(left))
+    right += [""] * (rows - len(right))
+    return "\n".join(f"{l:<{left_w}}{r}".rstrip() for l, r in zip(left, right)).rstrip("\n")
 
 
 def ns(**kw):
@@ -1606,8 +1678,9 @@ def main():
     s = sub.add_parser("ble"); s.add_argument("state", choices=["on", "off"]); s.set_defaults(f=cmd_ble)
     s = sub.add_parser("name"); s.add_argument("name"); s.set_defaults(f=cmd_name)
     s = sub.add_parser("splash"); s.add_argument("state", choices=["on", "off"]); s.set_defaults(f=cmd_splash)
-    s = sub.add_parser("charging-screen", help="seconds the charging screen shows at boot, 0 = skip")
-    s.add_argument("seconds", type=int, choices=range(61), metavar="0-60"); s.set_defaults(f=cmd_charging)
+    s = sub.add_parser("charging-screen", help="seconds the charging screen shows at boot, 0 = skip, "
+                       "'button' = until a button press")
+    s.add_argument("seconds", metavar="0-60|button"); s.set_defaults(f=cmd_charging)
     s = sub.add_parser("security", help="on = Bluetooth clients must pair with the PIN (USB only)")
     s.add_argument("state", choices=["on", "off"]); s.set_defaults(f=cmd_security)
     s = sub.add_parser("pin", help="show or set the 6-digit pairing PIN (USB only)")

@@ -153,7 +153,7 @@ python badgetool.py text "Hello" "Second slot" --mode center
 | `ble on\|off` | always-on Bluetooth (badge reboots) |
 | `name "NAME"` | Bluetooth name, max 20 characters (badge reboots) |
 | `splash on\|off` | startup animation |
-| `charging-screen 0-60` | seconds the charging screen shows at boot (default 5); 0 boots straight to the slots |
+| `charging-screen 0-60\|button` | seconds the charging screen shows at boot (default 5); 0 boots straight to the slots, `button` waits for a button press (Bluetooth stays off until then; firmware 1.5.0) |
 | `security on\|off` | on = Bluetooth devices must pair with the PIN; USB only, see [Pairing and the PIN](#pairing-and-the-pin) |
 | `pin [NNNNNN\|random]` | shows the PIN and how many devices are paired, or sets a new one (which removes every pairing); USB only |
 | `forget-bonds` | removes every paired device; USB only |
@@ -749,8 +749,9 @@ the PIN starts at 123456.
 The `STA` reply is layout 2 since 1.3.0: byte 63 holds the charging screen
 seconds, and the version string before it is cut to 19 characters, so readers
 of layout 1 (which stop at its NUL) keep working. The charging screen itself is
-a setting from 0 to 255 seconds in the firmware, default 5, where 0 skips it;
-`badgetool.py charging-screen` takes 0 to 60. Settings saved by older builds
+a setting from 0 to 254 seconds in the firmware, default 5, where 0 skips it
+and 255 waits for a key press (before 1.5.0, 255 meant 255 seconds);
+`badgetool.py charging-screen` takes 0 to 60 or `button`. Settings saved by older builds
 are migrated when you update, so nothing resets.
 
 The Badge Magic app finds badges by the advertised service `0xFEE0`, so
