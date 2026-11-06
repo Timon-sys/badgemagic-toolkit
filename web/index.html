@@ -356,14 +356,20 @@ class UsbLink {
     const w = this.waiter;
     if (w && magic === w.magic) { this.waiter = null; w.done(d); }
   }
+  // Done once the reply is in AND the write itself has finished: over Bluetooth
+  // the badge notifies the reply before it confirms the write, and starting the
+  // next command in that gap fails with "GATT operation already in progress".
   query(payload, magic) {
     return new Promise((res, rej) => {
+      let reply = null, written = false;
       const t = setTimeout(() => {
         this.waiter = null;
         const e = new Error("no reply (needs the patched firmware)"); e.name = "TimeoutError"; rej(e);
       }, this.replyMs || 1000);
-      this.waiter = { magic, done: d => { clearTimeout(t); res(d); } };
-      this.ng(payload).catch(e => { clearTimeout(t); this.waiter = null; rej(e); });
+      const finish = () => { if (reply && written) { clearTimeout(t); res(reply); } };
+      this.waiter = { magic, done: d => { reply = d; finish(); } };
+      this.ng(payload).then(() => { written = true; finish(); },
+                            e => { clearTimeout(t); this.waiter = null; rej(e); });
     });
   }
   async status() {
@@ -487,7 +493,9 @@ class BleLink {
     // nice to have; never let it block or fail the connect. But the badge refuses
     // it like every write while its PIN is required and this device isn't paired,
     // and battery reads still work then, so this is where that shows up first.
-    this._listen().catch(e => {
+    // attach() waits for this (bounded by the timeouts inside) before asking for
+    // replies, which arrive on these notifications
+    this.listening$ = this._listen().catch(e => {
       if (!pinRefused(e)) return;
       this.pinNeeded = true;
       log(PIN_HINT);
@@ -499,7 +507,7 @@ class BleLink {
   // builds, in equal parts of 2+ bytes with a smaller MTU
   async _listen() {
     if (!this.ngc) return;
-    const n = await this.ngc.service.getCharacteristic(U(0xf056));
+    const n = await withTimeout(this.ngc.service.getCharacteristic(U(0xf056)), 5000, "notify");
     this.rbuf = [];
     n.addEventListener("characteristicvaluechanged", e => {
       const d = new Uint8Array(dvBytes(e.target.value));
@@ -608,12 +616,18 @@ async function attach(l) {
   try {
     if (link) { const old = link; link = null; await old.close(); }
     await l.open();
+    // Ask everything before publishing the link: the keep-alive ping and the
+    // buttons only start once `link` is set, so nothing else writes meanwhile
+    // (two Bluetooth writes at once fail with "GATT operation already in progress").
+    // Over Bluetooth, replies need the f056 notifications running first.
+    if (l.listening$) await l.listening$;
+    let st = {}, cust = false, fil = null;
+    try { st = await l.status(); cust = l.kind === "ble" ? !!l.ngc : true; } catch {}
+    if (cust) try { fil = (await l.showSlot()).filled; } catch {}
     link = l; isLost = false; misses = 0;
     lastDev = { kind: l.kind, dev: l.dev };
-    try { status = await l.status(); custom = l.kind === "ble" ? !!l.ngc : true; }
-    catch { status = {}; custom = false; }
-    filled = null;
-    if (custom) try { filled = (await l.showSlot()).filled; } catch {}
+    status = st; custom = cust; filled = fil;
+    $("showHint").textContent = "";
     log(`connected: ${l.name} over ${KIND[l.kind]}${custom ? "" : " (text/image only)"}`);
     if (l.kind === "ble")
       l.dev.addEventListener("gattserverdisconnected", () => { if (link === l) lost("Bluetooth link dropped"); }, { once: true });
