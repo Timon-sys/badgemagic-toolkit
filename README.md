@@ -220,7 +220,20 @@ blink = false
 A message can show a picture instead of text with `image = "pic.png"`: the path
 is relative to the config file, the picture is scaled to 11 rows, dark pixels
 light up, and `invert = true` turns that around. Use `mode = "center"` for a
-still picture.
+still picture. Or draw it right in the file with `pixels`, one line per row,
+`#` for a lit LED and any other character for a dark one, up to 11 rows (fewer
+are centred vertically):
+
+```toml
+[[message]]
+mode = "center"
+pixels = '''
+.#.#.
+#####
+.###.
+..#..
+'''
+```
 
 Text and pictures are the same thing to the badge. A slot is nothing but a
 bitmap, 11 rows tall and as wide as you like, plus its scroll mode and speed.

@@ -1258,8 +1258,21 @@ def toml_speed(m, path):
 
 
 def toml_data(m, path, font):
-    """A message's 11-byte blocks: its text, or `image = "pic.png"` (path relative to
-    the toml file; dark = lit, `invert = true` for light, centred like 'image')."""
+    """A message's 11-byte blocks: its text, `image = "pic.png"` (path relative to
+    the toml file; dark = lit, `invert = true` for light, centred like 'image'), or
+    `pixels`, the picture drawn right in the file: one line per row, '#' lit, any
+    other character dark, up to 11 rows (fewer are centred vertically)."""
+    if "pixels" in m:
+        lines = str(m["pixels"]).split("\n")
+        while lines and not lines[-1].strip():  # the newline before the closing '''
+            lines.pop()
+        if not 1 <= len(lines) <= ROWS:
+            raise ValueError(f"{path}: pixels needs 1 to {ROWS} rows, got {len(lines)}")
+        w = max(len(l) for l in lines)
+        img = [[c == "#" for c in l.ljust(w)] for l in lines]
+        top = (ROWS - len(img)) // 2
+        img = [[False] * w] * top + img + [[False] * w] * (ROWS - len(img) - top)
+        return to_column_groups(img)[0]
     if "image" in m:
         pic = os.path.join(os.path.dirname(os.path.abspath(path)), m["image"])
         if not os.path.exists(pic):
