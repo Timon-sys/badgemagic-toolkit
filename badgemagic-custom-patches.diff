@@ -1076,7 +1076,7 @@ index ca7d0c6..0e10031 100644
  #endif /* __LEGACYCTRL_H__ */
 \ No newline at end of file
 diff --git a/src/main.c b/src/main.c
-index 7b4b3c6..5ccec2d 100644
+index 7b4b3c6..e14c581 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -26,6 +26,7 @@
@@ -1087,13 +1087,14 @@ index 7b4b3c6..5ccec2d 100644
  
  #define NEXT_STATE(v, min, max) \
  				(v)++; \
-@@ -74,7 +75,18 @@ static const char *menu_labels[] = {
+@@ -74,7 +75,19 @@ static const char *menu_labels[] = {
  #define BLE_NEXT_STEP       (1 << 4)
  #define CLOCK_TICK          (1 << 5)
  #define STOPWATCH_TICK  	(1 << 6)
 -#define BLE_OFF_DONE 		(1 << 7)
 +#define BLE_ADV_UPDATE 		(1 << 7)
 +#define SHOW_SLOT_REQ		(1 << 8)
++#define AFTER_RX		(1 << 9)
 +
 +/* LED tick: 8 kHz, 88 ticks per frame. Every BLE connection interval is a
 + * multiple of 1.25 ms = exactly 10 ticks, so the radio events land on the
@@ -1107,7 +1108,7 @@ index 7b4b3c6..5ccec2d 100644
  
  typedef enum {
      SW_STOPPED,
-@@ -87,12 +99,30 @@ static uint32_t sw_centiseconds = 0;
+@@ -87,12 +100,31 @@ static uint32_t sw_centiseconds = 0;
  static tmosTaskID common_taskid = INVALID_TASK_ID ;
  
  volatile uint16_t fb[LED_COLS] = {0};
@@ -1136,10 +1137,11 @@ index 7b4b3c6..5ccec2d 100644
  
  static void mode_setup_normal();
 +static void show_slot_now();
++static void after_rx();
  static void disp_clock();
  static void disp_menu();
  static void menu_up();
-@@ -107,18 +137,10 @@ static void bt_pairing_bypass();
+@@ -107,18 +139,10 @@ static void bt_pairing_bypass();
  __HIGH_CODE
  static void bm_transition()
  {
@@ -1160,7 +1162,7 @@ index 7b4b3c6..5ccec2d 100644
  }
  void play_splash(xbm_t *xbm, int col, int row, int spT)
  {
-@@ -127,9 +149,14 @@ void play_splash(xbm_t *xbm, int col, int row, int spT)
+@@ -127,12 +151,19 @@ void play_splash(xbm_t *xbm, int col, int row, int spT)
  	}
  }
  
@@ -1171,19 +1173,29 @@ index 7b4b3c6..5ccec2d 100644
  void load_bmlist()
  {
  	data_legacy_t header;
-+	slots_loaded = 0;
++	uint8_t loaded = 0;
  	data_get_header(&header);
- 	if (memcmp(header.header, "wang", 5))
+-	if (memcmp(header.header, "wang", 5))
++	if (memcmp(header.header, "wang", 5)) {
++		slots_loaded = 0;
  		return; // There is no bitmap stored in flash
-@@ -141,6 +168,7 @@ void load_bmlist()
++	}
+ 
+ 	bm_t *curr_bm = bmlist_current();
+ 
+@@ -141,7 +172,11 @@ void load_bmlist()
  		if (bm == NULL)
  			continue;
  		bmlist_append(bm);
-+		slots_loaded |= 1 << i;
++		loaded |= 1 << i;
  	}
++	/* Set in one go: a show-slot request (USB ISR) landing mid-reload saw a
++	 * half-built mask and called filled slots empty */
++	slots_loaded = loaded;
  	bmlist_gonext();
  
-@@ -235,20 +263,34 @@ static uint16_t common_tasks(tmosTaskID task_id, uint16_t events)
+ 	bmlist_drop(curr_bm);
+@@ -235,20 +270,39 @@ static uint16_t common_tasks(tmosTaskID task_id, uint16_t events)
  	}
  	
  	if (events & CLOCK_TICK) {
@@ -1221,10 +1233,15 @@ index 7b4b3c6..5ccec2d 100644
 +	if (events & SHOW_SLOT_REQ) {
 +		show_slot_now();
 +		return events ^ SHOW_SLOT_REQ;
++	}
++
++	if (events & AFTER_RX) {
++		after_rx();
++		return events ^ AFTER_RX;
  	}
  
  	return 0;
-@@ -261,14 +303,20 @@ void ble_setup()
+@@ -261,14 +315,20 @@ void ble_setup()
  
  	peripheral_init();
  
@@ -1249,7 +1266,7 @@ index 7b4b3c6..5ccec2d 100644
  }
  
  static void spawn_tasks()
-@@ -287,7 +335,7 @@ static void start_ble_animation()
+@@ -287,7 +347,7 @@ static void start_ble_animation()
  	tmos_stop_task(common_taskid, ANI_NEXT_STEP);
  	tmos_stop_task(common_taskid, ANI_MARQUE);
  	tmos_stop_task(common_taskid, ANI_FLASH);
@@ -1258,7 +1275,7 @@ index 7b4b3c6..5ccec2d 100644
  
  	tmos_start_reload_task(common_taskid, BLE_NEXT_STEP, 500000 / 625);
  }
-@@ -302,7 +350,10 @@ static void start_normal_animation()
+@@ -302,7 +362,10 @@ static void start_normal_animation()
  
  static void resume_from_streaming()
  {
@@ -1270,7 +1287,7 @@ index 7b4b3c6..5ccec2d 100644
  		start_normal_animation();
  	} else {
  		start_ble_animation();
-@@ -315,10 +366,10 @@ static void stop_all_animation()
+@@ -315,10 +378,10 @@ static void stop_all_animation()
  	tmos_stop_task(common_taskid, ANI_MARQUE);
  	tmos_stop_task(common_taskid, ANI_FLASH);
  	tmos_stop_task(common_taskid, BLE_NEXT_STEP);
@@ -1283,7 +1300,7 @@ index 7b4b3c6..5ccec2d 100644
  
  uint8_t streaming_setting(uint8_t *params, uint16_t len)
  {
-@@ -326,8 +377,18 @@ uint8_t streaming_setting(uint8_t *params, uint16_t len)
+@@ -326,8 +389,18 @@ uint8_t streaming_setting(uint8_t *params, uint16_t len)
  		stop_all_animation();
  		streaming_enabled = 1;
  	} else if (params[0] == 0x01) { // return to normal mode
@@ -1303,7 +1320,7 @@ index 7b4b3c6..5ccec2d 100644
  	}
  	return 0;
  }
-@@ -400,23 +461,24 @@ static void fb_puts_small(char *s, int len, int col, int row)
+@@ -400,23 +473,24 @@ static void fb_puts_small(char *s, int len, int col, int row)
      }
  }
  
@@ -1338,7 +1355,7 @@ index 7b4b3c6..5ccec2d 100644
  
      char buf[6];
      buf[0] = '0' + hour / 10;
-@@ -431,7 +493,7 @@ static void disp_clock()
+@@ -431,7 +505,7 @@ static void disp_clock()
  
  static void disp_menu()
  {
@@ -1347,7 +1364,7 @@ index 7b4b3c6..5ccec2d 100644
  
      int page = menu_cursor / 2;
      int item0 = page * 2;
-@@ -464,6 +526,43 @@ static void menu_down(){
+@@ -464,6 +538,43 @@ static void menu_down(){
  	disp_menu();
  }
  
@@ -1391,7 +1408,7 @@ index 7b4b3c6..5ccec2d 100644
  static void menu_select(){
      switch (menu_cursor) {
          case MENU_IDX_ANIMATION:
-@@ -473,29 +572,7 @@ static void menu_select(){
+@@ -473,29 +584,7 @@ static void menu_select(){
              mode_setup_normal();
              break;
          case MENU_IDX_BLE:
@@ -1422,7 +1439,7 @@ index 7b4b3c6..5ccec2d 100644
  			break;
          case MENU_IDX_CLOCK:
              enter_clock_submenu();
-@@ -530,7 +607,7 @@ static void disp_stopwatch()
+@@ -530,7 +619,7 @@ static void disp_stopwatch()
      buf[6] = '0' + centis % 10;
      buf[7] = '\0';
  
@@ -1431,7 +1448,7 @@ index 7b4b3c6..5ccec2d 100644
      fb_puts(buf, 7, 2, 2);  
  }
  
-@@ -553,6 +630,7 @@ static void sw_reset()
+@@ -553,6 +642,7 @@ static void sw_reset()
  
  static void sw_back()
  {
@@ -1439,7 +1456,7 @@ index 7b4b3c6..5ccec2d 100644
      sw_state = SW_STOPPED;
      tmos_stop_task(common_taskid, STOPWATCH_TICK);
      enter_clock_submenu();
-@@ -563,7 +641,7 @@ static int clock_submenu_sel = 0;
+@@ -563,7 +653,7 @@ static int clock_submenu_sel = 0;
  
  static void disp_clock_submenu()
  {
@@ -1448,7 +1465,7 @@ index 7b4b3c6..5ccec2d 100644
      if (clock_submenu_sel == 0)
          fb_putchar_small('>', 0, 0);
      else
-@@ -591,6 +669,7 @@ static void clock_submenu_select()
+@@ -591,6 +681,7 @@ static void clock_submenu_select()
          btn_onLongPress(KEY2, enter_clock_submenu);
      } else {
          // Enter Stopwatch mode
@@ -1456,7 +1473,7 @@ index 7b4b3c6..5ccec2d 100644
          sw_state = SW_STOPPED;
          sw_centiseconds = 0;
          disp_stopwatch();
-@@ -605,7 +684,7 @@ static int security_submenu_sel = 0;  // 0 = ENABLE, 1 = DISABLE
+@@ -605,7 +696,7 @@ static int security_submenu_sel = 0;  // 0 = ENABLE, 1 = DISABLE
  
  static void disp_security_submenu()
  {
@@ -1465,7 +1482,7 @@ index 7b4b3c6..5ccec2d 100644
      if (security_submenu_sel == 0)
          fb_putchar_small('>', 0, 0);
      else
-@@ -625,12 +704,13 @@ static void security_submenu_select()
+@@ -625,12 +716,13 @@ static void security_submenu_select()
  {
      badge_cfg.ble_security = (security_submenu_sel == 0) ? 1 : 0;
      cfg_writeflash_def(&badge_cfg);
@@ -1480,7 +1497,7 @@ index 7b4b3c6..5ccec2d 100644
  #if HW_KEY_COUNT == 4
      auxbtn_onOnePress(KEY4, return_to_menu);  // restore KEY4 to normal
  #else
-@@ -684,7 +764,7 @@ static int games_submenu_sel = 0;
+@@ -684,7 +776,7 @@ static int games_submenu_sel = 0;
  
  static void disp_games_submenu(void)
  {
@@ -1489,7 +1506,7 @@ index 7b4b3c6..5ccec2d 100644
      static const char *labels[] = { "SNAKE", "FLAPPY", "PONG" };
  
      int page  = games_submenu_sel / 2;
-@@ -749,9 +829,11 @@ void return_to_menu()
+@@ -749,9 +841,11 @@ void return_to_menu()
      tmos_stop_task(common_taskid, CLOCK_TICK);
      tmos_stop_task(common_taskid, STOPWATCH_TICK);
      sw_state = SW_STOPPED;
@@ -1501,7 +1518,7 @@ index 7b4b3c6..5ccec2d 100644
      btn_onOnePress(KEY1, menu_up);
      btn_onOnePress(KEY2, menu_down);
  #if HW_KEY_COUNT == 4
-@@ -766,23 +848,66 @@ void return_to_menu()
+@@ -766,23 +860,66 @@ void return_to_menu()
      disp_menu();
  }
  
@@ -1576,10 +1593,36 @@ index 7b4b3c6..5ccec2d 100644
  			DelayMs(500);
  			return;
  		}
-@@ -802,18 +927,79 @@ void reload_bmlist()
- 	load_bmlist();
+@@ -796,29 +933,124 @@ void clean_bmlist()
+ 		bmlist_drop(curr_bm->next);
  }
  
++/* The USB ISR allocates and frees the receive buffer of a legacy upload, and
++ * reloading the slots allocates and frees all slot buffers in the main loop.
++ * Both on one heap at the same time corrupt it (rapid uploads crashed the
++ * badge), so USB interrupts wait while the slots are rebuilt: a few ms, the
++ * host just retries. Restores the previous state, USB may not be up yet. */
++static uint32_t usb_irq_hold(void)
++{
++	uint32_t was_on = PFIC_GetStatusIRQ(USB_IRQn);
++	PFIC_DisableIRQ(USB_IRQn);
++	return was_on;
++}
++
++static void usb_irq_release(uint32_t was_on)
++{
++	if (was_on)
++		PFIC_EnableIRQ(USB_IRQn);
++}
++
+ void reload_bmlist()
+ {
++	uint32_t usb = usb_irq_hold();
+ 	clean_bmlist();
+ 	load_bmlist();
++	usb_irq_release(usb);
++}
++
 +/* Long-press KEY1 in normal mode cycles the 4 brightness levels.
 + * Runs in TMOS task context, so writing the config to EEPROM is safe. */
 +static void cycle_brightness()
@@ -1587,8 +1630,8 @@ index 7b4b3c6..5ccec2d 100644
 +	badge_cfg.led_brightness =
 +		(badge_cfg.led_brightness + 1) & (BRIGHTNESS_LEVELS - 1);
 +	cfg_writeflash_def(&badge_cfg);	/* blanks the LEDs itself, see leds_pause() */
-+}
-+
+ }
+ 
  static void mode_setup_normal()
  {
 +	/* Also reached from handle_after_rx(), which used to leave `mode` at
@@ -1644,11 +1687,15 @@ index 7b4b3c6..5ccec2d 100644
 +	tmos_set_event(common_taskid, BLE_ADV_UPDATE);
 +
 +	uint8_t slot = show_slot_req;
-+	if (!(slots_loaded & (1 << slot)))
-+		return;	/* gone since the request: stay on the first one */
-+	for (uint8_t i = 0; i < slot; i++)
-+		if (slots_loaded & (1 << i))
-+			bmlist_gonext();
++	if (slots_loaded & (1 << slot)) {	/* else gone since the request: stay on the first one */
++		for (uint8_t i = 0; i < slot; i++)
++			if (slots_loaded & (1 << i))
++				bmlist_gonext();
++	}
++	/* start_normal_animation() puts the first frame 500 ms out, which left
++	 * the screen dark that long after every jump: draw it right away */
++	tmos_stop_task(common_taskid, ANI_NEXT_STEP);
++	tmos_set_event(common_taskid, ANI_NEXT_STEP);
 +}
 +
  static void disp_ble_off()
@@ -1658,7 +1705,22 @@ index 7b4b3c6..5ccec2d 100644
      fb_puts_small("BLUETOOTH", 9, 4, 0);
      fb_puts_small("OFF", 3, 4, 6);
  }
-@@ -827,9 +1013,12 @@ void handle_after_rx()
+ 
++/* An upload finished. Over USB this is called from the USB ISR, and the work
++ * below reloads the slots (free + malloc) while the main loop may be drawing
++ * the current slot from its buffer: use-after-free and heap corruption, a
++ * crash once the leak in bmlist_drop() was fixed and buffers really got
++ * freed. So only flag it here; common_tasks does the work. */
+ void handle_after_rx()
++{
++	tmos_set_event(common_taskid, AFTER_RX);
++}
++
++static void after_rx()
+ {
+     if (badge_cfg.reset_rx) {
+         SYS_ResetExecute();
+@@ -827,9 +1059,12 @@ void handle_after_rx()
          tmos_stop_task(common_taskid, STOPWATCH_TICK);
          sw_state = SW_STOPPED;
          clock_active = 0;
@@ -1674,7 +1736,7 @@ index 7b4b3c6..5ccec2d 100644
      }
  }
  
-@@ -840,12 +1029,15 @@ int main()
+@@ -840,12 +1075,15 @@ int main()
  	debug_init();
  	PRINT("\nDebug console is on UART%d\n", DEBUG);
  
@@ -1693,7 +1755,7 @@ index 7b4b3c6..5ccec2d 100644
  	TMR0_ITCfg(ENABLE, TMR0_3_IT_CYC_END);
  	PFIC_EnableIRQ(TMR0_IRQn);
  
-@@ -863,19 +1055,34 @@ int main()
+@@ -863,19 +1101,36 @@ int main()
  #endif
  
  	power_init();
@@ -1716,7 +1778,9 @@ index 7b4b3c6..5ccec2d 100644
 +	if (badge_cfg.splash_speedT)
 +		play_splash(&spl, 0, 0, badge_cfg.splash_speedT);
  
++	uint32_t usb = usb_irq_hold();
  	load_bmlist();
++	usb_irq_release(usb);
  
  	ble_setup();
 +	/* bit7 = pre-emption priority. Let the LED tick interrupt the radio and
@@ -1730,7 +1794,7 @@ index 7b4b3c6..5ccec2d 100644
  
  	spawn_tasks();
  	btn_init_task();
-@@ -887,10 +1094,12 @@ int main()
+@@ -887,10 +1142,12 @@ int main()
  	pong_init();
  	stop_all_animation();
  
@@ -1745,7 +1809,7 @@ index 7b4b3c6..5ccec2d 100644
  	}
  }
  
-@@ -899,20 +1108,36 @@ __HIGH_CODE
+@@ -899,20 +1156,36 @@ __HIGH_CODE
  void TMR0_IRQHandler(void)
  {
  	static int i;

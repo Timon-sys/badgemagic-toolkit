@@ -644,6 +644,13 @@ storage, and the screens and buttons.
   slots were left allocated. A handful of reloads ran the heap dry and the badge
   crashed, rebooting with its clock reset to 2020. Found because jumping between
   slots reloads them every time: a few jumps in a row were enough.
+- Fixing that leak uncovered the next crash: at the end of a USB upload the
+  slots were reloaded from inside the USB interrupt, while the main loop could
+  be drawing from those very buffers, now that they really get freed. The
+  reload runs in the main loop now, and USB interrupts wait during it (a few
+  milliseconds; the host retries), so the next upload's receive buffer and the
+  slot buffers are never allocated at the same time. 100 uploads back to back
+  and thousands of slot jumps per second run without a crash.
 
 #### Screens, power and buttons
 
