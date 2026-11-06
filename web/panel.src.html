@@ -78,6 +78,7 @@ label.chk { display: inline-flex; gap: 4px; align-items: center; }
     <button id="btnRe" class="primary" hidden>Reconnect</button>
     <button id="btnWatch" title="ping the badge every 2 s, notice a lost link and reconnect">keep-alive</button>
     <button id="btnUsb">USB</button>
+    <button id="btnSerial" title="the badge's COM port instead of its HID interface; needs firmware 1.3.0 or later">Serial</button>
     <button id="btnBle">Bluetooth</button>
     <button id="btnDisc" disabled>Disconnect</button>
   </header>
@@ -320,33 +321,20 @@ setInterval(() => {
 
 // ---------------------------------------------------------------- links
 
-class HidLink {
-  constructor(dev) { this.dev = dev; this.kind = "usb"; this.waiter = null; this.onReport = this.onReport.bind(this); }
-  async open() {
-    if (!this.dev.opened) await this.dev.open();
-    this.dev.addEventListener("inputreport", this.onReport);
-  }
-  async close() { this.dev.removeEventListener("inputreport", this.onReport); try { await this.dev.close(); } catch {} }
-  get name() { return this.dev.productName || "USB badge"; }
-  async writeReports(data, label) {
-    const n = Math.ceil(data.length / 64);
-    for (let i = 0; i < data.length; i += 64) {
-      const c = new Uint8Array(64); c.set(data.subarray(i, i + 64));
-      await withTimeout(this.dev.sendReport(0, c), 2000, "USB write");
-      tx(c, n > 1 ? `${label} ${i / 64 + 1}/${n}` : label);
-    }
-  }
+// Both USB transports send the same ng frames and get the same 64-byte replies
+// back; only how the bytes leave and arrive differs, so that part lives here.
+class UsbLink {
   async ng(payload) {
     const p = Uint8Array.from(payload), f = new Uint8Array(4 + p.length);
     f.set([0x4e, 0x47, p.length & 0xff, p.length >> 8]); f.set(p, 4);
-    await this.writeReports(f, ngName(p));
+    await this.write(f, ngName(p));
   }
-  onReport(e) {
-    const d = new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength);
+  // a reply, 64 bytes starting with the three letters that say what it is
+  gotReply(d) {
     const magic = String.fromCharCode(d[0], d[1], d[2]);
     rx(d, { STA: "status", BAT: "battery", PIN: "pin" }[magic] || "report");
     const w = this.waiter;
-    if (w && String.fromCharCode(d[0], d[1], d[2]) === w.magic) { this.waiter = null; w.done(d); }
+    if (w && magic === w.magic) { this.waiter = null; w.done(d); }
   }
   query(payload, magic) {
     return new Promise((res, rej) => {
@@ -380,13 +368,91 @@ class HidLink {
       return { pin: v.getUint32(3, true), bleSecurity: !!r[7], bonds: r[8] };
     } catch { this.noPin = true; return {}; }
   }
-  async upload(pkt) {
-    const p = new Uint8Array(Math.ceil(pkt.length / 64) * 64); p.set(pkt);
-    await this.writeReports(p, "upload");
-  }
   yearByte() { return new Date().getFullYear() % 100; }
 }
 
+class HidLink extends UsbLink {
+  constructor(dev) { super(); this.dev = dev; this.kind = "usb"; this.waiter = null; this.onReport = this.onReport.bind(this); }
+  async open() {
+    if (!this.dev.opened) await this.dev.open();
+    this.dev.addEventListener("inputreport", this.onReport);
+  }
+  async close() { this.dev.removeEventListener("inputreport", this.onReport); try { await this.dev.close(); } catch {} }
+  get name() { return this.dev.productName || "USB badge"; }
+  // HID OUT reports are a fixed 64 bytes, report ID 0 in front
+  async write(data, label) {
+    const n = Math.ceil(data.length / 64);
+    for (let i = 0; i < data.length; i += 64) {
+      const c = new Uint8Array(64); c.set(data.subarray(i, i + 64));
+      await withTimeout(this.dev.sendReport(0, c), 2000, "USB write");
+      tx(c, n > 1 ? `${label} ${i / 64 + 1}/${n}` : label);
+    }
+  }
+  onReport(e) { this.gotReply(new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength)); }
+  async upload(pkt) {
+    const p = new Uint8Array(Math.ceil(pkt.length / 64) * 64); p.set(pkt);
+    await this.write(p, "upload");
+  }
+}
+
+// The badge's second USB interface, a COM port. Only the toolkit firmware has
+// one that can be opened on Windows (1.3.0 and later), and it is the same
+// speed as HID. Frames go out as a plain byte stream, unpadded.
+class SerialLink extends UsbLink {
+  constructor(port) { super(); this.dev = this.port = port; this.kind = "serial"; this.waiter = null; this.buf = new Uint8Array(0); }
+  get name() {
+    const i = this.port.getInfo ? this.port.getInfo() : {};
+    return i.usbProductId ? `badge ${hex4(i.usbVendorId)}:${hex4(i.usbProductId)}` : "serial badge";
+  }
+  async open() {
+    // the baud rate is ignored by the badge, but Web Serial insists on one
+    try { await withTimeout(this.port.open({ baudRate: 115200 }), 4000, "serial open"); }
+    catch (e) { if (e.name !== "InvalidStateError") throw e; }  // already open
+    this.reader = this.port.readable.getReader();
+    this.writer = this.port.writable.getWriter();
+    this.pump();
+  }
+  async close() {
+    this.closing = true;
+    try { await this.reader.cancel(); } catch {}
+    try { this.reader.releaseLock(); } catch {}
+    try { this.writer.releaseLock(); } catch {}
+    try { await this.port.close(); } catch {}
+  }
+  async pump() {
+    try {
+      for (;;) {
+        const { value, done } = await this.reader.read();
+        if (done) break;
+        this.feed(value);
+      }
+    } catch {}  // the port went away mid-read
+    if (!this.closing && link === this) lost("serial port closed");
+  }
+  // CDC is a byte stream: a reply can arrive split, or two can arrive together
+  feed(chunk) {
+    const b = new Uint8Array(this.buf.length + chunk.length);
+    b.set(this.buf); b.set(chunk, this.buf.length);
+    this.buf = b;
+    while (this.buf.length >= 64) {
+      this.gotReply(this.buf.subarray(0, 64));
+      this.buf = this.buf.slice(64);
+    }
+  }
+  async write(data, label) {
+    await withTimeout(this.writer.write(data), 2000, "serial write");
+    tx(data, label);
+  }
+  async upload(pkt) {
+    // Unpadded, unlike HID: the firmware stores exactly what arrives. The
+    // "wang" header has to start a fresh USB packet, so let whatever was
+    // written just before go out first.
+    await sleep(50);
+    await this.write(pkt, "upload");
+  }
+}
+
+const hex4 = n => (n ?? 0).toString(16).padStart(4, "0");
 const U = n => BluetoothUUID.canonicalUUID(n);
 const pinRefused = e => e.name === "SecurityError" || /authori|authenti|insufficient|security/i.test(e.message);
 const PIN_HINT = "the badge wants its Bluetooth PIN: pair this device in its Bluetooth settings " +
@@ -474,6 +540,10 @@ class BleLink {
 
 // ---------------------------------------------------------------- state
 
+const KIND = { usb: "USB", serial: "USB serial", ble: "Bluetooth" };
+const KIND_SHORT = { usb: "USB", serial: "COM", ble: "BT" };
+const onUsb = l => l && l.kind !== "ble";   // HID or serial: a cable, not Bluetooth
+
 let link = null, custom = false, status = {}, busy = Promise.resolve();
 let rebootPending = false;
 let lastDev = null;            // {kind, dev} of the badge to reconnect to
@@ -507,7 +577,7 @@ async function attach(l) {
     lastDev = { kind: l.kind, dev: l.dev };
     try { status = await l.status(); custom = l.kind === "ble" ? !!l.ngc : true; }
     catch { status = {}; custom = false; }
-    log(`connected: ${l.name} over ${l.kind === "usb" ? "USB" : "Bluetooth"}${custom ? "" : " (text/image only)"}`);
+    log(`connected: ${l.name} over ${KIND[l.kind]}${custom ? "" : " (text/image only)"}`);
     if (l.kind === "ble")
       l.dev.addEventListener("gattserverdisconnected", () => { if (link === l) lost("Bluetooth link dropped"); }, { once: true });
   } finally { attaching = false; refreshUi(); }
@@ -531,6 +601,13 @@ async function reconnect() {
       || ds.find(d => d.vendorId === VID && d.productId === PID && d.collections.some(c => c.usagePage === 0xff00));
     if (!d) throw new Error("not on USB");
     await attach(new HidLink(d));
+  } else if (lastDev.kind === "serial") {
+    // after a reboot the same device comes back as a fresh port object
+    const ps = await navigator.serial.getPorts();
+    const isBadge = p => { const i = p.getInfo(); return i.usbVendorId === VID && i.usbProductId === PID; };
+    const port = ps.find(p => p === lastDev.dev && p.readable !== undefined) || ps.find(isBadge);
+    if (!port) throw new Error("no badge serial port");
+    await attach(new SerialLink(port));
   } else {
     await attach(new BleLink(lastDev.dev));
   }
@@ -562,6 +639,13 @@ async function connectUsb() {
   const devs = await navigator.hid.requestDevice({ filters: [{ vendorId: VID, productId: PID }] });
   const d = devs.find(d => d.collections.some(c => c.usagePage === 0xff00)) || devs[0];
   if (d) await attach(new HidLink(d)).catch(e => log("USB: " + e.message));
+}
+
+async function connectSerial() {
+  if (!navigator.serial) return log("Web Serial isn't available here: use desktop Chrome or Edge");
+  const port = await navigator.serial.requestPort({ filters: [{ usbVendorId: VID, usbProductId: PID }] });
+  await attach(new SerialLink(port)).catch(e => log("serial: " + e.message +
+    " — a port that can be opened on Windows needs firmware 1.3.0 or later"));
 }
 
 async function connectBle() {
@@ -600,7 +684,7 @@ if (navigator.hid) {
   navigator.hid.addEventListener("connect", async e => {
     const d = e.device;
     if (link || d.vendorId !== VID || d.productId !== PID) return;
-    if (lastDev && lastDev.kind === "ble") return;  // don't hijack a Bluetooth session
+    if (lastDev && lastDev.kind !== "usb") return;  // don't hijack a Bluetooth or serial session
     await sleep(1000);
     if (link) return;
     await attach(new HidLink(d)).catch(err => log("USB: " + err.message));
@@ -620,13 +704,32 @@ if (navigator.hid) {
   });
 }
 
+if (navigator.serial) {
+  navigator.serial.addEventListener("connect", async e => {
+    if (link || !lastDev || lastDev.kind !== "serial") return;
+    const i = e.target.getInfo();
+    if (i.usbVendorId !== VID || i.usbProductId !== PID) return;
+    await sleep(1000);
+    if (link) return;
+    await attach(new SerialLink(e.target)).catch(err => log("serial: " + err.message));
+    if (rebootPending && custom) {
+      await run("time", l => l.ng(timePayload())).catch(() => {});
+      log("back up, clock restored");
+    }
+    rebootPending = false;
+  });
+  navigator.serial.addEventListener("disconnect", e => {
+    if (link && link.kind === "serial" && link.port === e.target) lost("badge unplugged");
+  });
+}
+
 // keep-alive: ping every 2 s (status over USB, battery read over Bluetooth); two misses = lost.
 // Off: refresh the status every 6 s without judging. Skipped while anything else is talking.
 let watch = true, tickN = 0;
 setInterval(() => {
   tickN++;
   if (!link || rebootPending || inFlight || live) return;
-  if (link.kind === "usb" && !custom) return;  // factory firmware never answers
+  if (onUsb(link) && !custom) return;  // factory firmware never answers
   if (!watch && tickN % 3) return;
   run(null, async l => { status = await l.status(); misses = 0; refreshUi(); }).catch(e => {
     if (!watch || !linkError(e)) return;
@@ -643,7 +746,7 @@ function batteryPct(mv) { return Math.max(0, Math.min(100, Math.round((mv - 3300
 
 function refreshUi() {
   const c = $("conn");
-  if (link) { c.textContent = `${link.name} · ${link.kind === "usb" ? "USB" : "BT"}`; c.className = "pill ok"; }
+  if (link) { c.textContent = `${link.name} · ${KIND_SHORT[link.kind]}`; c.className = "pill ok"; }
   else if (rebootPending) { c.textContent = "rebooting…"; c.className = "pill warn"; }
   else if (reconnecting || attaching) { c.textContent = "reconnecting…"; c.className = "pill warn"; }
   else if (isLost) { c.textContent = "badge lost"; c.className = "pill bad"; }
@@ -657,11 +760,11 @@ function refreshUi() {
   $("btnLive").disabled = !link || !custom;
   document.querySelectorAll("[data-need=custom], #bright button, #splash button, #bleOn button")
     .forEach(b => b.disabled = !link || !custom);
-  const pinOk = !!link && link.kind === "usb" && status.pin != null;
+  const pinOk = !!link && onUsb(link) && status.pin != null;
   document.querySelectorAll("[data-need=pin], #bleSec button").forEach(b => b.disabled = !pinOk);
   $("pinIn").disabled = !pinOk;
   $("pinHint").textContent = !link || pinOk ? "(USB only)"
-    : link.kind === "usb" ? "(needs firmware 1.4.0)" : "(change it over USB)";
+    : onUsb(link) ? "(needs firmware 1.4.0)" : "(change it over USB)";
 
   const s = status, st = [];
   if (link) {
@@ -742,6 +845,7 @@ $("btnOff").onclick = () => run("power off", async l => {
   await l.close(); link = null; custom = false; status = {}; rebootPending = false; stopLive(); refreshUi();
 });
 $("btnUsb").onclick = () => connectUsb().catch(e => e.name !== "NotFoundError" && log(e.message));
+$("btnSerial").onclick = () => connectSerial().catch(e => e.name !== "NotFoundError" && log(e.message));
 $("btnBle").onclick = () => connectBle().catch(e => e.name !== "NotFoundError" && log(e.message));
 $("btnDisc").onclick = detach;
 $("btnTrafReset").onclick = () => traffic.reset();
