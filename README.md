@@ -21,8 +21,9 @@ ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
   the long one.
 - `badgetool.py` drives the badges from a PC over USB (HID or serial) and over
   Bluetooth: the clock, brightness, Bluetooth name, always-on mode and PIN, the
-  battery voltage, text and image uploads, jumping to a slot, live streaming
-  and firmware flashing, as commands or from an interactive menu.
+  battery voltage and chip temperature, text and image uploads, jumping to a
+  slot, live streaming and firmware flashing, as commands or from an
+  interactive menu.
   [What works over which connection](#what-works-over-which-connection)
   has the details.
 - `ls32/ls32_image.py` shows static images on the older LS32 badges.
@@ -68,13 +69,12 @@ ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
   wherever the badge is (clock, menu, BT-PAIRING), and `status` tells you
   everything, voltage and clock included, over USB and Bluetooth alike.
 - A thermometer you didn't know you had: the CH582 has a temperature sensor on
-  its own die, and `battery` and `status` now read it. The firmware takes 16
-  samples and converts their sum against the calibration point (nominally
-  25 °C) that WCH burns into every chip's ROM. One degree is only 2.7 ADC
-  counts, so converting the sum instead of the average is what gets the
-  readings down to 0.1 °C steps.
-  Read it as a trend: one factory point is all the calibration there is, and
-  it measures the chip, not the room.
+  its own die, and since 1.6.0 `battery` and `status` read it. The firmware
+  takes 16 samples and converts their sum against the calibration point
+  (nominally 25 °C) that WCH burns into every chip's ROM. One degree is only
+  2.7 ADC counts, so converting the sum instead of the average is what gets
+  the readings down to 0.1 °C steps. Read it as a trend: one factory point is
+  all the calibration there is, and it measures the chip, not the room.
 
 The full list of upstream bugs this fixes is under
 [What was broken upstream](#what-was-broken-upstream).
@@ -119,6 +119,7 @@ With the patched firmware, this is the whole picture.
 | Live streaming | ~60 fps | ~60 fps | 20 to 30 fps on `fastble` builds, about 4 fps otherwise ([details](#streaming-speed)) |
 | Settings (clock, brightness, name, always-on, splash, charging screen) | yes | yes | yes |
 | Full status and battery voltage | yes | yes | yes (firmware 1.5.0 and later; before that the battery percentage and firmware version only) |
+| Chip temperature | yes (firmware 1.6.0 and later) | yes (1.6.0 and later) | yes (1.6.0 and later) |
 | Jump to a slot (`slot N`) | yes | yes | yes (firmware 1.5.0 and later) |
 | PIN settings (`security`, `pin`, `forget-bonds`) | yes | yes | no, by design |
 | Flashing firmware | ISP mode only | no | no |
@@ -155,7 +156,7 @@ python badgetool.py text "Hello" "Second slot" --mode center
 | Command | What it does |
 |---|---|
 | `list` | badges on USB (and their serial ports), or in range with `--ble` |
-| `status` | mode, clock, brightness, Bluetooth settings, battery |
+| `status` | mode, clock, brightness, Bluetooth settings, battery, chip temperature |
 | `battery [-w SECONDS]` | voltage, raw ADC value, charging state and chip temperature, optionally refreshed |
 | `time` | sets the badge clock to the PC time |
 | `slot [N]` | shows slot N (1-8) now, leaving the clock, menu or BT-PAIRING; the button steps on from there. Without N: which slots are filled |
@@ -397,8 +398,9 @@ live preview of the scroll modes, a 44×11 draw pad that can mirror itself live
 onto the badge, images, the settings, reboot and power off. A keep-alive ping
 notices a lost badge within a few seconds and reconnects, and a TX/RX monitor
 shows every packet. Over USB it also sets the
-[PIN](#pairing-and-the-pin). It does not have the charging-screen setting yet;
-use `badgetool.py charging-screen` for that.
+[PIN](#pairing-and-the-pin). It does not have the charging-screen setting or
+the chip temperature yet; use `badgetool.py charging-screen` and
+`badgetool.py battery` for those.
 
 Both browser APIs need a secure context: `localhost`, a `file://` page or
 `https://`. The panel is a single file, so to use it from a phone, put
@@ -406,8 +408,9 @@ Both browser APIs need a secure context: `localhost`, a `file://` page or
 fine: click through the warning once and Web Bluetooth works. Factory-firmware
 badges get text and images only. Over Bluetooth, firmware 1.5.0 shows the full
 status (voltage, clock, settings) like USB does; older firmware shows only the
-battery percentage and firmware version, as `badgetool.py` does. Below the messages, "Show on the badge now" jumps to a slot (empty slots
-are greyed out; firmware 1.5.0 and later).
+battery percentage and firmware version, as `badgetool.py` does. Below the
+messages, "Show on the badge now" jumps to a slot (empty slots are greyed out;
+firmware 1.5.0 and later).
 
 `index.html` is built from `panel.src.html` by `python build.py`, which copies
 the fonts out of `badgetool.py`. Edit the source, then rebuild.
@@ -489,7 +492,7 @@ otherwise.
 | `badgemagic-ch582-2key.bin` | `normal` | normal | standard | ran on a PB6 board (all but line T); upstream-wired board untested |
 | `badgemagic-ch582-2key-pb6.bin` | `pb6` | PB6 | standard | yes: USB HID, serial and Bluetooth (every command; streaming 4 fps, 150/150 frames); v1.4.0 with the PIN on: every command over USB and Bluetooth, legacy pairing from Windows |
 | `badgemagic-ch582-2key-fastble.bin` | `normal-fastble` | normal | fast | same code as `pb6-fastble` but the LED pin; upstream-wired board untested |
-| `badgemagic-ch582-2key-pb6-fastble.bin` | `pb6-fastble` | PB6 | fast | yes: USB HID, serial and Bluetooth (every command; streaming 20 to 30 fps, 13 to 23 fps with nearly every LED lit, 300/300 frames); the phone app on two badges with v1.2.1; v1.4.0 with the PIN on: every command over USB HID, serial and Bluetooth, pairing from Windows, Android and the app; v1.5.0: 109-check regression of every command over USB HID, serial and Bluetooth, plus the web panel over serial and Bluetooth |
+| `badgemagic-ch582-2key-pb6-fastble.bin` | `pb6-fastble` | PB6 | fast | yes: USB HID, serial and Bluetooth (every command; streaming 20 to 30 fps, 13 to 23 fps with nearly every LED lit, 300/300 frames); the phone app on two badges with v1.2.1; v1.4.0 with the PIN on: every command over USB HID, serial and Bluetooth, pairing from Windows, Android and the app; v1.5.0: 109-check regression of every command over USB HID, serial and Bluetooth, plus the web panel over serial and Bluetooth; v1.6.0: the same regression plus the temperature (115 checks), and 2 minutes of battery and temperature requests over HID, serial and Bluetooth at once (4,314 replies, all plausible and in agreement across the three); Bluetooth replies under steady USB requests as reliable as on 1.5.0 (0 timeouts) |
 
 The `normal` builds ran for weeks on my badges (an earlier version), and
 everything worked except the LEDs on line T, because both my badges are wired
@@ -733,7 +736,7 @@ BUILD_DIR=usb-c-2key-t6 KEY_COUNT=2 LED_T_PB6=1 make   # pb6 build
 
 The version string comes from `TOOLKIT_VERSION` in the patched `Makefile`: the
 firmware names itself after the toolkit release, so `status` and the Bluetooth
-device info show `v0.1-toolkit-1.5.0` (upstream base, then the toolkit
+device info show `v0.1-toolkit-1.6.0` (upstream base, then the toolkit
 version) instead of the git description, which was the same for every build
 here. The result is `<BUILD_DIR>/badgemagic-ch582.bin`, and a clean checkout
 with the patches builds byte-identical copies of the files in `firmware/`.
@@ -762,9 +765,9 @@ argument) and forget bonds, and since 1.5.0 show slot (9). The `PIN` reply is
 bonds.
 
 The `BAT` reply is `'B' 'A' 'T'`, the raw ADC value and the voltage in mV (both
-u16 little endian), charging (0 or 1), then the chip temperature in tenths of a
-degree as an i16 and a 1 at byte 10 that says the temperature is there. Older
-firmware leaves those bytes at zero.
+u16 little endian), charging (0 or 1), then, since 1.6.0, the chip temperature
+in tenths of a degree as an i16 and a 1 at byte 10 that says the temperature is
+there. Older firmware leaves those bytes at zero.
 
 Show slot takes the slot number 0 to 7 and leaves the clock, stopwatch, menu or
 BT-PAIRING for the slots; with no argument it only asks. Either way it answers

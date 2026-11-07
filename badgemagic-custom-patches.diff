@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index a360b59..91e534f 100644
+index a360b59..f990da6 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -20,7 +20,11 @@ OPT = -Os
@@ -10,7 +10,7 @@ index a360b59..91e534f 100644
 +# badgemagic-toolkit: builds are named after the toolkit release. The name has
 +# to start with the upstream tag, because the USB serial-number string takes
 +# the first characters of VERSION up to the tag's length.
-+TOOLKIT_VERSION = 1.5.0
++TOOLKIT_VERSION = 1.6.0
 +VERSION = $(VERSION_ABBR)-toolkit-$(TOOLKIT_VERSION)
  VERSION_ABBR = $(shell git describe --abbrev=0 --tags 2>/dev/null || echo "unknown")
  ifeq ($(VERSION_ABBR),unknown)
@@ -2238,7 +2238,7 @@ index 0b57333..b1a15ae 100644
  
      // similar to snake 
 diff --git a/src/power.c b/src/power.c
-index 5d2e5c2..0f5fa6a 100644
+index 5d2e5c2..535a56f 100644
 --- a/src/power.c
 +++ b/src/power.c
 @@ -2,10 +2,30 @@
@@ -2291,7 +2291,7 @@ index 5d2e5c2..0f5fa6a 100644
  	PFIC_EnableIRQ(GPIO_A_IRQn);
  	PWR_PeriphWakeUpCfg(ENABLE, RB_SLP_GPIO_WAKE, Long_Delay);
  
-@@ -22,33 +50,85 @@ void poweroff()
+@@ -22,31 +50,96 @@ void poweroff()
  	LowPower_Shutdown(0);
  }
  
@@ -2312,54 +2312,59 @@ index 5d2e5c2..0f5fa6a 100644
  	ADC_ChannelCfg(1);
  }
  
+-int batt_raw()
 +/* The ADC is read from the main loop (BLE battery level, BLE replies, the
 + * charging screen) and from the USB interrupt (USB replies). The temperature
 + * reading switches the ADC to another input, so a USB request landing in the
-+ * middle of a main-loop read would get (or leave) the wrong input. Hold USB
-+ * interrupts for the length of one reading, well under a millisecond; inside
-+ * the USB ISR this changes nothing. */
-+static uint32_t adc_hold(void)
-+{
-+	uint32_t was_on = PFIC_GetStatusIRQ(USB_IRQn);
-+	PFIC_DisableIRQ(USB_IRQn);
-+	return was_on;
-+}
++ * middle of a main-loop reading leaves it with samples from the wrong input.
++ * Every reading bumps adc_seq when it is done; a reading that sees it move
++ * while it ran was interrupted and starts over. The USB interrupt is never
++ * interrupted by the main loop, so its readings always count. Masking the USB
++ * interrupt instead made Bluetooth replies time out under USB load. */
++static volatile uint32_t adc_seq;
 +
-+static void adc_release(uint32_t was_on)
-+{
-+	if (was_on)
-+		PFIC_EnableIRQ(USB_IRQn);
-+}
++#define ADC_TRIES 5
 +
- int batt_raw()
++/* Selects its input itself: from the USB interrupt it can land in the middle
++ * of a main-loop temperature reading, with the ADC on the sensor. */
++static int batt_raw_once()
  {
  	int ret = 0;
-+	uint32_t usb = adc_hold();
  
- 	PRINT("ADC reading: \n");
- 	uint16_t buf[20];
- 	for(int i = 0; i < 20; i++) {
+-	PRINT("ADC reading: \n");
+-	uint16_t buf[20];
+-	for(int i = 0; i < 20; i++) {
 -		uint16_t adc = ADC_ExcutSingleConver();
-+		int adc = ADC_ExcutSingleConver() + adc_calib;
- 		ret += adc;
- 		PRINT("%d \n", adc);
+-		ret += adc;
+-		PRINT("%d \n", adc);
++	ADC_ExtSingleChSampInit(SampleFreq_3_2, ADC_PGA_0);
++	ADC_ChannelCfg(1);
++	ADC_ExcutSingleConver();	/* first one after switching is off */
++	for(int i = 0; i < 20; i++)
++		ret += ADC_ExcutSingleConver() + adc_calib;
++	return ret / 20;
++}
++
++int batt_raw()
++{
++	int ret;
++	for (int i = 0; i < ADC_TRIES; i++) {
++		uint32_t seen = adc_seq;
++		ret = batt_raw_once();
++		if (adc_seq++ == seen)
++			break;
  	}
-+	adc_release(usb);
++	return ret;
++}
  
- 	return ret / 20;
- }
- 
+-	return ret / 20;
 +/* Chip (die) temperature in tenths of a degree C from the internal sensor.
 + * Uses the factory calibration at ROM_CFG_TMP_25C like the SDK's
 + * adc_to_temperature_celsius(), but keeps one decimal. The ADC is shared
 + * with the battery reading, so it is set back to that afterwards. */
-+int chip_temp_dC()
++static int temp_sum_once()
 +{
-+	uint32_t c25 = *((PUINT32)ROM_CFG_TMP_25C);
-+	int t_cal = (c25 >> 16) & 0xFFFF;
-+	int adc_cal = c25 & 0xFFFF;
 +	int sum = 0;
-+	uint32_t usb = adc_hold();
 +
 +	ADC_InterTSSampInit();
 +	ADC_ExcutSingleConver();	/* first one after switching is off */
@@ -2369,17 +2374,30 @@ index 5d2e5c2..0f5fa6a 100644
 +
 +	ADC_ExtSingleChSampInit(SampleFreq_3_2, ADC_PGA_0);
 +	ADC_ChannelCfg(1);
-+	adc_release(usb);
++	return sum;
++}
++
++int chip_temp_dC()
++{
++	uint32_t c25 = *((PUINT32)ROM_CFG_TMP_25C);
++	int t_cal = (c25 >> 16) & 0xFFFF;
++	int adc_cal = c25 & 0xFFFF;
++	int sum;
++
++	for (int i = 0; i < ADC_TRIES; i++) {
++		uint32_t seen = adc_seq;
++		sum = temp_sum_once();
++		if (adc_seq++ == seen)
++			break;
++	}
 +
 +	/* from the sum, not the averaged value: 2.7 ADC steps per degree, so
 +	 * averaging first would round to ~0.4 C steps */
 +	return (t_cal ? t_cal : 25) * 10 + (sum - 16 * adc_cal) * 100 / (27 * 16);
-+}
-+
+ }
+ 
  int charging_status()
- {
- 	GPIOA_ModeCfg(CHARGE_STT_PIN, GPIO_ModeIN_PU);
-@@ -67,6 +147,15 @@ int charging_status()
+@@ -67,6 +160,15 @@ int charging_status()
  #define ADC2VOLT(raw)           ((raw) / ADC_MAX_VAL * ADC_MAX_VOLT)
  #define VOLT2ADC(volt)          ((volt) / ADC_MAX_VOLT * ADC_MAX_VAL)
  
