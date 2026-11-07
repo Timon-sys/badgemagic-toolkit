@@ -1852,7 +1852,7 @@ index 7b4b3c6..e14c581 100644
 +}
 \ No newline at end of file
 diff --git a/src/ngctrl.c b/src/ngctrl.c
-index b5a687e..cf2907d 100644
+index b5a687e..043e4d4 100644
 --- a/src/ngctrl.c
 +++ b/src/ngctrl.c
 @@ -4,10 +4,21 @@
@@ -1918,7 +1918,7 @@ index b5a687e..cf2907d 100644
  static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
  {
  	PRINT(__func__);
-@@ -161,6 +189,132 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
+@@ -161,6 +189,134 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
  	return 0;
  }
  
@@ -1936,14 +1936,16 @@ index b5a687e..cf2907d 100644
 +}
 +
 +/* Replies with one 64-byte report: 'B' 'A' 'T' raw_lo raw_hi mv_lo mv_hi
-+ * charging, zero padded. Over BLE as f056 notifications, see
-+ * ng_notify_reply(). */
++ * charging, chip temperature in 0.1 C as int16 (8, 9), 1 at 10 = the
++ * temperature is there (older firmware: zero padded). Over BLE as f056
++ * notifications, see ng_notify_reply(). */
 +static uint8_t cfg_battery(uint8_t *val, uint16_t len)
 +{
 +	int raw = batt_raw();
 +	int mv = batt_raw2mv(raw);
++	int t = chip_temp_dC();
 +	uint8_t r[64] = { 'B', 'A', 'T', raw & 0xff, raw >> 8, mv & 0xff, mv >> 8,
-+	                  (uint8_t)charging_status() };
++	                  (uint8_t)charging_status(), t & 0xff, (t >> 8) & 0xff, 1 };
 +	ng_reply(r, sizeof(r));
 +	return 0;
 +}
@@ -2051,7 +2053,7 @@ index b5a687e..cf2907d 100644
  uint8_t misc(uint8_t *val, uint16_t len)
  {
  	PRINT(__func__);
-@@ -170,6 +324,14 @@ uint8_t misc(uint8_t *val, uint16_t len)
+@@ -170,6 +326,14 @@ uint8_t misc(uint8_t *val, uint16_t len)
  	const uint8_t (*misc_cmd[])(uint8_t *, uint16_t) = {
  		cfg_splash_speed,
  		cfg_led_brightness,
@@ -2066,7 +2068,7 @@ index b5a687e..cf2907d 100644
  	};
  
  	uint8_t fn = val[0];
-@@ -194,6 +356,124 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
+@@ -194,6 +358,124 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
  
  #define CMD_LUT_LEN (sizeof(cmd_lut) / sizeof(cmd_lut[0]))
  
@@ -2236,7 +2238,7 @@ index 0b57333..b1a15ae 100644
  
      // similar to snake 
 diff --git a/src/power.c b/src/power.c
-index 5d2e5c2..965b1f7 100644
+index 5d2e5c2..0f5fa6a 100644
 --- a/src/power.c
 +++ b/src/power.c
 @@ -2,10 +2,30 @@
@@ -2289,7 +2291,7 @@ index 5d2e5c2..965b1f7 100644
  	PFIC_EnableIRQ(GPIO_A_IRQn);
  	PWR_PeriphWakeUpCfg(ENABLE, RB_SLP_GPIO_WAKE, Long_Delay);
  
-@@ -22,13 +50,17 @@ void poweroff()
+@@ -22,33 +50,85 @@ void poweroff()
  	LowPower_Shutdown(0);
  }
  
@@ -2308,7 +2310,32 @@ index 5d2e5c2..965b1f7 100644
  	PRINT("RoughCalib_Value = %d \n", adc_calib);
  
  	ADC_ChannelCfg(1);
-@@ -41,7 +73,7 @@ int batt_raw()
+ }
+ 
++/* The ADC is read from the main loop (BLE battery level, BLE replies, the
++ * charging screen) and from the USB interrupt (USB replies). The temperature
++ * reading switches the ADC to another input, so a USB request landing in the
++ * middle of a main-loop read would get (or leave) the wrong input. Hold USB
++ * interrupts for the length of one reading, well under a millisecond; inside
++ * the USB ISR this changes nothing. */
++static uint32_t adc_hold(void)
++{
++	uint32_t was_on = PFIC_GetStatusIRQ(USB_IRQn);
++	PFIC_DisableIRQ(USB_IRQn);
++	return was_on;
++}
++
++static void adc_release(uint32_t was_on)
++{
++	if (was_on)
++		PFIC_EnableIRQ(USB_IRQn);
++}
++
+ int batt_raw()
+ {
+ 	int ret = 0;
++	uint32_t usb = adc_hold();
+ 
  	PRINT("ADC reading: \n");
  	uint16_t buf[20];
  	for(int i = 0; i < 20; i++) {
@@ -2317,7 +2344,42 @@ index 5d2e5c2..965b1f7 100644
  		ret += adc;
  		PRINT("%d \n", adc);
  	}
-@@ -67,6 +99,15 @@ int charging_status()
++	adc_release(usb);
+ 
+ 	return ret / 20;
+ }
+ 
++/* Chip (die) temperature in tenths of a degree C from the internal sensor.
++ * Uses the factory calibration at ROM_CFG_TMP_25C like the SDK's
++ * adc_to_temperature_celsius(), but keeps one decimal. The ADC is shared
++ * with the battery reading, so it is set back to that afterwards. */
++int chip_temp_dC()
++{
++	uint32_t c25 = *((PUINT32)ROM_CFG_TMP_25C);
++	int t_cal = (c25 >> 16) & 0xFFFF;
++	int adc_cal = c25 & 0xFFFF;
++	int sum = 0;
++	uint32_t usb = adc_hold();
++
++	ADC_InterTSSampInit();
++	ADC_ExcutSingleConver();	/* first one after switching is off */
++	for (int i = 0; i < 16; i++)
++		sum += ADC_ExcutSingleConver();
++	ADC_DisableTSPower();
++
++	ADC_ExtSingleChSampInit(SampleFreq_3_2, ADC_PGA_0);
++	ADC_ChannelCfg(1);
++	adc_release(usb);
++
++	/* from the sum, not the averaged value: 2.7 ADC steps per degree, so
++	 * averaging first would round to ~0.4 C steps */
++	return (t_cal ? t_cal : 25) * 10 + (sum - 16 * adc_cal) * 100 / (27 * 16);
++}
++
+ int charging_status()
+ {
+ 	GPIOA_ModeCfg(CHARGE_STT_PIN, GPIO_ModeIN_PU);
+@@ -67,6 +147,15 @@ int charging_status()
  #define ADC2VOLT(raw)           ((raw) / ADC_MAX_VAL * ADC_MAX_VOLT)
  #define VOLT2ADC(volt)          ((volt) / ADC_MAX_VOLT * ADC_MAX_VAL)
  
@@ -2334,12 +2396,14 @@ index 5d2e5c2..965b1f7 100644
  {
  	float vadc = ADC2VOLT(r);
 diff --git a/src/power.h b/src/power.h
-index 199a96e..c062511 100644
+index 199a96e..a8ffab8 100644
 --- a/src/power.h
 +++ b/src/power.h
-@@ -13,5 +13,6 @@ void poweroff();
+@@ -12,6 +12,8 @@ void power_init();
+ void poweroff();
  int batt_raw();
  int charging_status();
++int chip_temp_dC();
  int batt_raw2percent(int r);
 +int batt_raw2mv(int r);
  

@@ -4,7 +4,7 @@ Run without arguments for an interactive menu, or use a command:
 
   python badgetool.py list                      what is plugged in
   python badgetool.py status                    everything the badge reports
-  python badgetool.py battery [-w 5]            voltage / raw ADC / charging
+  python badgetool.py battery [-w 5]            voltage / raw ADC / charging / chip temperature
   python badgetool.py time                      set the clock to the PC time
   python badgetool.py brightness 0-3            3 = brightest
   python badgetool.py ble on|off                always-on Bluetooth (reboots)
@@ -317,10 +317,17 @@ class Badge:
     def status(self):
         return parse_status(self.ng_query(bytes([CMD_MISC, MISC_STATUS]), b"STA"))
 
-    def battery(self):
+    def battery_info(self):
+        """(raw, mV, charging, chip temperature in C or None). The temperature
+        is the CH582's internal sensor (die temperature, a few degrees rough);
+        firmware before it leaves byte 10 at 0."""
         r = self.ng_query(bytes([CMD_MISC, MISC_BATTERY]), b"BAT")
         raw, mv = struct.unpack_from("<HH", r, 3)
-        return raw, mv, bool(r[7])
+        temp = struct.unpack_from("<h", r, 8)[0] / 10 if r[10] == 1 else None
+        return raw, mv, bool(r[7]), temp
+
+    def battery(self):
+        return self.battery_info()[:3]
 
     def show_slot(self, slot=None):
         """slot 0-7: show it now; None: only ask. Returns (result, filled):
@@ -603,6 +610,7 @@ class BleBadge:
         return self._read(BATT_LEVEL)[0]
 
     battery = Badge.battery
+    battery_info = Badge.battery_info
     show_slot = Badge.show_slot
 
     def pin_info(self):
@@ -926,6 +934,7 @@ battery        {s['battery_pct']} %
     else:
         s = b.status()
     pin = b.pin_info()
+    temp = b.battery_info()[3]
     b.close()
     if pin is None:
         sec = f"PIN {'on' if s['ble_security'] else 'off'}"
@@ -944,6 +953,8 @@ brightness     {s['brightness']} / 3
 bluetooth      name "{s['ble_name']}", always-on {'yes' if s['ble_always_on'] else 'no'}, {sec}
 startup anim   {'off' if s['splash_ms'] == 0 else 'on'}
 charging scr   {'(needs firmware 1.3.0)' if s['charging_screen_s'] is None else charging_text(s['charging_screen_s'])}""")
+    if temp is not None:
+        print(f"chip temp      {temp:.1f} C  (internal sensor, die temperature)")
 
 
 def cmd_battery(a):
@@ -954,7 +965,7 @@ def cmd_battery(a):
             reading = None
             if not pct_only:
                 try:
-                    reading = b.battery()
+                    reading = b.battery_info()
                 except RuntimeError as e:
                     if not isinstance(b, BleBadge) or "no reply" not in str(e):
                         raise
@@ -963,9 +974,10 @@ def cmd_battery(a):
                 print(f"{time.strftime('%H:%M:%S')}  {b.battery_pct()} %  "
                       "(voltage over Bluetooth needs firmware 1.5.0)")
             else:
-                raw, mv, chg = reading
+                raw, mv, chg, temp = reading
                 print(f"{time.strftime('%H:%M:%S')}  {mv/1000:.3f} V  raw {raw:4d}  "
-                      f"{'charging' if chg else 'on battery'}")
+                      f"{'charging' if chg else 'on battery'}"
+                      + (f"  chip {temp:.1f} C" if temp is not None else ""))
             if not a.watch:
                 break
             time.sleep(a.watch)

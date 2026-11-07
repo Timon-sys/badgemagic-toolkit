@@ -67,6 +67,14 @@ ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
 - Remote control without buttons: `badgetool.py slot 3` jumps to slot 3 from
   wherever the badge is (clock, menu, BT-PAIRING), and `status` tells you
   everything, voltage and clock included, over USB and Bluetooth alike.
+- A thermometer you didn't know you had: the CH582 has a temperature sensor on
+  its own die, and `battery` and `status` now read it. The firmware takes 16
+  samples and converts their sum against the calibration point (nominally
+  25 °C) that WCH burns into every chip's ROM. One degree is only 2.7 ADC
+  counts, so converting the sum instead of the average is what gets the
+  readings down to 0.1 °C steps.
+  Read it as a trend: one factory point is all the calibration there is, and
+  it measures the chip, not the room.
 
 The full list of upstream bugs this fixes is under
 [What was broken upstream](#what-was-broken-upstream).
@@ -148,7 +156,7 @@ python badgetool.py text "Hello" "Second slot" --mode center
 |---|---|
 | `list` | badges on USB (and their serial ports), or in range with `--ble` |
 | `status` | mode, clock, brightness, Bluetooth settings, battery |
-| `battery [-w SECONDS]` | voltage, raw ADC value and charging state, optionally refreshed |
+| `battery [-w SECONDS]` | voltage, raw ADC value, charging state and chip temperature, optionally refreshed |
 | `time` | sets the badge clock to the PC time |
 | `slot [N]` | shows slot N (1-8) now, leaving the clock, menu or BT-PAIRING; the button steps on from there. Without N: which slots are filled |
 | `brightness 0-3` | 3 = brightest. 0 flickers slightly, by design |
@@ -752,6 +760,11 @@ only: security on and off, the PIN (set it, or read the `PIN` reply with no
 argument) and forget bonds, and since 1.5.0 show slot (9). The `PIN` reply is
 `'P' 'I' 'N'`, the PIN as u32 little endian, security on, and the number of
 bonds.
+
+The `BAT` reply is `'B' 'A' 'T'`, the raw ADC value and the voltage in mV (both
+u16 little endian), charging (0 or 1), then the chip temperature in tenths of a
+degree as an i16 and a 1 at byte 10 that says the temperature is there. Older
+firmware leaves those bytes at zero.
 
 Show slot takes the slot number 0 to 7 and leaves the clock, stopwatch, menu or
 BT-PAIRING for the slots; with no argument it only asks. Either way it answers
