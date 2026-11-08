@@ -391,16 +391,16 @@ Over USB it is about 60 fps regardless.
 ## Web panel (`web/`)
 
 `web/index.html` is a control panel that runs in the browser, with no Python
-needed: open it in Chrome or Edge and connect over USB (WebHID, desktop only),
+needed: open it in Chrome or Edge and connect over USB HID (WebHID, desktop only),
 USB serial (Web Serial, desktop; firmware 1.3.0 or later) or Bluetooth (Web
 Bluetooth, desktop and Android). It does text slots with a
 live preview of the scroll modes, a 44×11 draw pad that can mirror itself live
 onto the badge, images, the settings, reboot and power off. A keep-alive ping
 notices a lost badge within a few seconds and reconnects, and a TX/RX monitor
 shows every packet. Over USB it also sets the
-[PIN](#pairing-and-the-pin). It does not have the charging-screen setting or
-the chip temperature yet; use `badgetool.py charging-screen` and
-`badgetool.py battery` for those.
+[PIN](#pairing-and-the-pin). It shows the chip temperature next to the
+battery (firmware 1.6.0, over all three connections) and sets the charging
+screen (firmware 1.3.0 and later).
 
 Both browser APIs need a secure context: `localhost`, a `file://` page or
 `https://`. The panel is a single file, so to use it from a phone, put
