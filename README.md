@@ -26,6 +26,11 @@ ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
   interactive menu.
   [What works over which connection](#what-works-over-which-connection)
   has the details.
+- A [web panel](#web-panel-web) that needs nothing installed:
+  **[open it here](https://timon-sys.github.io/badgemagic-toolkit/)** in
+  Chrome or Edge, on a PC or an Android phone, and connect over USB or
+  Bluetooth. Text slots with a live preview, a draw pad that mirrors itself
+  onto the badge, images and the settings.
 - `ls32/ls32_image.py` shows static images on the older LS32 badges.
 
 ## Contents
@@ -399,6 +404,10 @@ Over USB it is about 60 fps regardless.
 
 ## Web panel (`web/`)
 
+**Live at <https://timon-sys.github.io/badgemagic-toolkit/>**, always the
+version on `main` (GitHub Pages, published by
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml)).
+
 `web/index.html` is a control panel that runs in the browser, with no Python
 needed: open it in Chrome or Edge and connect over USB HID (WebHID, desktop only),
 USB serial (Web Serial, desktop; firmware 1.3.0 or later) or Bluetooth (Web
@@ -412,9 +421,10 @@ battery (firmware 1.6.0, over all three connections) and sets the charging
 screen (firmware 1.3.0 and later).
 
 Both browser APIs need a secure context: `localhost`, a `file://` page or
-`https://`. The panel is a single file, so to use it from a phone, put
-`index.html` on any web server that has HTTPS. A self-signed certificate is
-fine: click through the warning once and Web Bluetooth works. Factory-firmware
+`https://`. The GitHub Pages copy is HTTPS, so it works from a phone as it
+is. The panel is a single file, so you can also put `index.html` on your own
+web server with HTTPS. A self-signed certificate is fine: click through the
+warning once and Web Bluetooth works. Factory-firmware
 badges get text and images only. Over Bluetooth, firmware 1.5.0 shows the full
 status (voltage, clock, settings) like USB does; older firmware shows only the
 battery percentage and firmware version, as `badgetool.py` does. Below the
