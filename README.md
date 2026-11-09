@@ -75,6 +75,15 @@ ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
   2.7 ADC counts, so converting the sum instead of the average is what gets
   the readings down to 0.1 °C steps. Read it as a trend: one factory point is
   all the calibration there is, and it measures the chip, not the room.
+- A battery that doesn't get run flat: since 1.6.1 the badge checks its
+  battery every 30 seconds, and after three readings in a row under 3.3 V
+  (0 % on its own scale) it shows the empty-battery warning for 2 seconds and
+  switches itself off. The button or a charger switches it back on. The
+  threshold is fixed in the firmware. The check pauses while charging, and
+  the first one comes 30 seconds after switching on, so a badge on an empty
+  battery stays up long enough to plug in or flash. Tested on a drained badge:
+  streaming full white at full brightness, it showed the warning and switched
+  off about 2 minutes after the charger came off.
 
 The full list of upstream bugs this fixes is under
 [What was broken upstream](#what-was-broken-upstream).
@@ -492,7 +501,7 @@ otherwise.
 | `badgemagic-ch582-2key.bin` | `normal` | normal | standard | ran on a PB6 board (all but line T); upstream-wired board untested |
 | `badgemagic-ch582-2key-pb6.bin` | `pb6` | PB6 | standard | yes: USB HID, serial and Bluetooth (every command; streaming 4 fps, 150/150 frames); v1.4.0 with the PIN on: every command over USB and Bluetooth, legacy pairing from Windows |
 | `badgemagic-ch582-2key-fastble.bin` | `normal-fastble` | normal | fast | same code as `pb6-fastble` but the LED pin; upstream-wired board untested |
-| `badgemagic-ch582-2key-pb6-fastble.bin` | `pb6-fastble` | PB6 | fast | yes: USB HID, serial and Bluetooth (every command; streaming 20 to 30 fps, 13 to 23 fps with nearly every LED lit, 300/300 frames); the phone app on two badges with v1.2.1; v1.4.0 with the PIN on: every command over USB HID, serial and Bluetooth, pairing from Windows, Android and the app; v1.5.0: 109-check regression of every command over USB HID, serial and Bluetooth, plus the web panel over serial and Bluetooth; v1.6.0: the same regression plus the temperature (115 checks), and 2 minutes of battery and temperature requests over HID, serial and Bluetooth at once (4,314 replies, all plausible and in agreement across the three); Bluetooth replies under steady USB requests as reliable as on 1.5.0 (0 timeouts); the web panel's temperature and charging-screen setting over USB HID, serial and Bluetooth |
+| `badgemagic-ch582-2key-pb6-fastble.bin` | `pb6-fastble` | PB6 | fast | yes: USB HID, serial and Bluetooth (every command; streaming 20 to 30 fps, 13 to 23 fps with nearly every LED lit, 300/300 frames); the phone app on two badges; pairing with the PIN from Windows, Android and the app; the web panel over all three connections. Since 1.5.0 an automated test script runs every command over USB HID, serial and Bluetooth before each release |
 
 The `normal` builds ran for weeks on my badges (an earlier version), and
 everything worked except the LEDs on line T, because both my badges are wired
@@ -652,6 +661,9 @@ storage, and the screens and buttons.
   the buffer happened to be aligned. It reads the two bytes separately now.
 - The pairing menu left the BLE animation fighting with the menu when you left
   it.
+- The standard Bluetooth battery level (what phones show) went to 254 % on an
+  empty battery: under 3.3 V the percentage goes negative, and it was sent as
+  a single unsigned byte. It stops at 0 % now.
 
   ![The badge menu with its BT pairing animation](pictures/badge-menu-animation-bt-pairing.jpg)
 
@@ -736,7 +748,7 @@ BUILD_DIR=usb-c-2key-t6 KEY_COUNT=2 LED_T_PB6=1 make   # pb6 build
 
 The version string comes from `TOOLKIT_VERSION` in the patched `Makefile`: the
 firmware names itself after the toolkit release, so `status` and the Bluetooth
-device info show `v0.1-toolkit-1.6.0` (upstream base, then the toolkit
+device info show `v0.1-toolkit-1.6.1` (upstream base, then the toolkit
 version) instead of the git description, which was the same for every build
 here. The result is `<BUILD_DIR>/badgemagic-ch582.bin`, and a clean checkout
 with the patches builds byte-identical copies of the files in `firmware/`.

@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index a360b59..f990da6 100644
+index a360b59..04d627d 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -20,7 +20,11 @@ OPT = -Os
@@ -10,7 +10,7 @@ index a360b59..f990da6 100644
 +# badgemagic-toolkit: builds are named after the toolkit release. The name has
 +# to start with the upstream tag, because the USB serial-number string takes
 +# the first characters of VERSION up to the tag's length.
-+TOOLKIT_VERSION = 1.6.0
++TOOLKIT_VERSION = 1.6.1
 +VERSION = $(VERSION_ABBR)-toolkit-$(TOOLKIT_VERSION)
  VERSION_ABBR = $(shell git describe --abbrev=0 --tags 2>/dev/null || echo "unknown")
  ifeq ($(VERSION_ABBR),unknown)
@@ -379,6 +379,22 @@ index 39e7e79..25db034 100644
 +void ng_notify_reply(uint8_t *val, uint8_t len);
  
  #endif /* __BLE_UART_SERVICE_H__ */
+diff --git a/src/ble/profile/batt.c b/src/ble/profile/batt.c
+index 09b1a1e..df9d715 100644
+--- a/src/ble/profile/batt.c
++++ b/src/ble/profile/batt.c
+@@ -28,7 +28,10 @@ static bStatus_t read_handler(uint16_t connHandle, gattAttribute_t *pAttr,
+ 	}
+ 
+ 	*pLen = 1;
+-	battLv_Val[0] = batt_raw2percent(batt_raw());
++	/* 0-100 per the spec; under 3.3 V the percentage goes negative, and -2
++	 * went out as 254 % in the single unsigned byte */
++	int pct = batt_raw2percent(batt_raw());
++	battLv_Val[0] = pct < 0 ? 0 : pct;
+ 	tmos_memcpy(p_value, battLv_Val, *pLen);
+ 
+ 	return SUCCESS;
 diff --git a/src/ble/profile/legacy.c b/src/ble/profile/legacy.c
 index 2c127a8..ab0b6ad 100644
 --- a/src/ble/profile/legacy.c
@@ -1076,7 +1092,7 @@ index ca7d0c6..0e10031 100644
  #endif /* __LEGACYCTRL_H__ */
 \ No newline at end of file
 diff --git a/src/main.c b/src/main.c
-index 7b4b3c6..e14c581 100644
+index 7b4b3c6..6a6e8d1 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -26,6 +26,7 @@
@@ -1087,7 +1103,7 @@ index 7b4b3c6..e14c581 100644
  
  #define NEXT_STATE(v, min, max) \
  				(v)++; \
-@@ -74,7 +75,19 @@ static const char *menu_labels[] = {
+@@ -74,7 +75,34 @@ static const char *menu_labels[] = {
  #define BLE_NEXT_STEP       (1 << 4)
  #define CLOCK_TICK          (1 << 5)
  #define STOPWATCH_TICK  	(1 << 6)
@@ -1095,6 +1111,21 @@ index 7b4b3c6..e14c581 100644
 +#define BLE_ADV_UPDATE 		(1 << 7)
 +#define SHOW_SLOT_REQ		(1 << 8)
 +#define AFTER_RX		(1 << 9)
++#define BATT_CHECK		(1 << 10)
++
++/* Low-battery cutoff: every BATT_CHECK_T the battery is read, and after
++ * LOW_BATT_COUNT readings in a row under LOW_BATT_MV the badge shows the
++ * empty battery for 2 s and switches itself off, like the menu's OFF (the
++ * button or plugging in a charger switches it back on). 3.3 V is 0 % on the
++ * badge's own scale; under load the cell reads a little lower than at rest.
++ * Skipped while charging (the reading is the charger's then) and under
++ * LOW_BATT_NO_CELL_MV, which is no cell at all, e.g. running on USB with the
++ * battery unplugged. The first check is BATT_CHECK_T after boot, so a badge
++ * woken on an empty cell stays up long enough to plug in or flash. */
++#define LOW_BATT_MV		3300
++#define LOW_BATT_NO_CELL_MV	2500
++#define LOW_BATT_COUNT		3
++#define BATT_CHECK_T		(30000000) // uS
 +
 +/* LED tick: 8 kHz, 88 ticks per frame. Every BLE connection interval is a
 + * multiple of 1.25 ms = exactly 10 ticks, so the radio events land on the
@@ -1108,7 +1139,7 @@ index 7b4b3c6..e14c581 100644
  
  typedef enum {
      SW_STOPPED,
-@@ -87,12 +100,31 @@ static uint32_t sw_centiseconds = 0;
+@@ -87,12 +115,32 @@ static uint32_t sw_centiseconds = 0;
  static tmosTaskID common_taskid = INVALID_TASK_ID ;
  
  volatile uint16_t fb[LED_COLS] = {0};
@@ -1136,12 +1167,13 @@ index 7b4b3c6..e14c581 100644
  __HIGH_CODE
  
  static void mode_setup_normal();
++static void low_batt_off();
 +static void show_slot_now();
 +static void after_rx();
  static void disp_clock();
  static void disp_menu();
  static void menu_up();
-@@ -107,18 +139,10 @@ static void bt_pairing_bypass();
+@@ -107,18 +155,10 @@ static void bt_pairing_bypass();
  __HIGH_CODE
  static void bm_transition()
  {
@@ -1162,7 +1194,7 @@ index 7b4b3c6..e14c581 100644
  }
  void play_splash(xbm_t *xbm, int col, int row, int spT)
  {
-@@ -127,12 +151,19 @@ void play_splash(xbm_t *xbm, int col, int row, int spT)
+@@ -127,12 +167,19 @@ void play_splash(xbm_t *xbm, int col, int row, int spT)
  	}
  }
  
@@ -1183,7 +1215,7 @@ index 7b4b3c6..e14c581 100644
  
  	bm_t *curr_bm = bmlist_current();
  
-@@ -141,7 +172,11 @@ void load_bmlist()
+@@ -141,7 +188,11 @@ void load_bmlist()
  		if (bm == NULL)
  			continue;
  		bmlist_append(bm);
@@ -1195,7 +1227,7 @@ index 7b4b3c6..e14c581 100644
  	bmlist_gonext();
  
  	bmlist_drop(curr_bm);
-@@ -235,20 +270,39 @@ static uint16_t common_tasks(tmosTaskID task_id, uint16_t events)
+@@ -235,20 +286,49 @@ static uint16_t common_tasks(tmosTaskID task_id, uint16_t events)
  	}
  	
  	if (events & CLOCK_TICK) {
@@ -1238,10 +1270,20 @@ index 7b4b3c6..e14c581 100644
 +	if (events & AFTER_RX) {
 +		after_rx();
 +		return events ^ AFTER_RX;
++	}
++
++	if (events & BATT_CHECK) {
++		static int low;
++		int mv = batt_raw2mv(batt_raw());
++		if (charging_status() || mv < LOW_BATT_NO_CELL_MV || mv >= LOW_BATT_MV)
++			low = 0;
++		else if (++low >= LOW_BATT_COUNT)
++			low_batt_off();
++		return events ^ BATT_CHECK;
  	}
  
  	return 0;
-@@ -261,14 +315,20 @@ void ble_setup()
+@@ -261,14 +341,20 @@ void ble_setup()
  
  	peripheral_init();
  
@@ -1266,7 +1308,15 @@ index 7b4b3c6..e14c581 100644
  }
  
  static void spawn_tasks()
-@@ -287,7 +347,7 @@ static void start_ble_animation()
+@@ -280,6 +366,7 @@ static void spawn_tasks()
+ 	tmos_start_reload_task(common_taskid, SCAN_BOOTLD_BTN,
+ 				SCAN_BOOTLD_BTN_SPEED_T / 625);
+ 	tmos_start_task(common_taskid, ANI_NEXT_STEP, 500000 / 625);
++	tmos_start_reload_task(common_taskid, BATT_CHECK, BATT_CHECK_T / 625);
+ }
+ 
+ static void start_ble_animation()
+@@ -287,7 +374,7 @@ static void start_ble_animation()
  	tmos_stop_task(common_taskid, ANI_NEXT_STEP);
  	tmos_stop_task(common_taskid, ANI_MARQUE);
  	tmos_stop_task(common_taskid, ANI_FLASH);
@@ -1275,7 +1325,7 @@ index 7b4b3c6..e14c581 100644
  
  	tmos_start_reload_task(common_taskid, BLE_NEXT_STEP, 500000 / 625);
  }
-@@ -302,7 +362,10 @@ static void start_normal_animation()
+@@ -302,7 +389,10 @@ static void start_normal_animation()
  
  static void resume_from_streaming()
  {
@@ -1287,7 +1337,7 @@ index 7b4b3c6..e14c581 100644
  		start_normal_animation();
  	} else {
  		start_ble_animation();
-@@ -315,10 +378,10 @@ static void stop_all_animation()
+@@ -315,10 +405,10 @@ static void stop_all_animation()
  	tmos_stop_task(common_taskid, ANI_MARQUE);
  	tmos_stop_task(common_taskid, ANI_FLASH);
  	tmos_stop_task(common_taskid, BLE_NEXT_STEP);
@@ -1300,7 +1350,7 @@ index 7b4b3c6..e14c581 100644
  
  uint8_t streaming_setting(uint8_t *params, uint16_t len)
  {
-@@ -326,8 +389,18 @@ uint8_t streaming_setting(uint8_t *params, uint16_t len)
+@@ -326,8 +416,18 @@ uint8_t streaming_setting(uint8_t *params, uint16_t len)
  		stop_all_animation();
  		streaming_enabled = 1;
  	} else if (params[0] == 0x01) { // return to normal mode
@@ -1320,7 +1370,7 @@ index 7b4b3c6..e14c581 100644
  	}
  	return 0;
  }
-@@ -400,23 +473,24 @@ static void fb_puts_small(char *s, int len, int col, int row)
+@@ -400,23 +500,24 @@ static void fb_puts_small(char *s, int len, int col, int row)
      }
  }
  
@@ -1355,7 +1405,7 @@ index 7b4b3c6..e14c581 100644
  
      char buf[6];
      buf[0] = '0' + hour / 10;
-@@ -431,7 +505,7 @@ static void disp_clock()
+@@ -431,7 +532,7 @@ static void disp_clock()
  
  static void disp_menu()
  {
@@ -1364,7 +1414,7 @@ index 7b4b3c6..e14c581 100644
  
      int page = menu_cursor / 2;
      int item0 = page * 2;
-@@ -464,6 +538,43 @@ static void menu_down(){
+@@ -464,6 +565,43 @@ static void menu_down(){
  	disp_menu();
  }
  
@@ -1408,7 +1458,7 @@ index 7b4b3c6..e14c581 100644
  static void menu_select(){
      switch (menu_cursor) {
          case MENU_IDX_ANIMATION:
-@@ -473,29 +584,7 @@ static void menu_select(){
+@@ -473,29 +611,7 @@ static void menu_select(){
              mode_setup_normal();
              break;
          case MENU_IDX_BLE:
@@ -1439,7 +1489,7 @@ index 7b4b3c6..e14c581 100644
  			break;
          case MENU_IDX_CLOCK:
              enter_clock_submenu();
-@@ -530,7 +619,7 @@ static void disp_stopwatch()
+@@ -530,7 +646,7 @@ static void disp_stopwatch()
      buf[6] = '0' + centis % 10;
      buf[7] = '\0';
  
@@ -1448,7 +1498,7 @@ index 7b4b3c6..e14c581 100644
      fb_puts(buf, 7, 2, 2);  
  }
  
-@@ -553,6 +642,7 @@ static void sw_reset()
+@@ -553,6 +669,7 @@ static void sw_reset()
  
  static void sw_back()
  {
@@ -1456,7 +1506,7 @@ index 7b4b3c6..e14c581 100644
      sw_state = SW_STOPPED;
      tmos_stop_task(common_taskid, STOPWATCH_TICK);
      enter_clock_submenu();
-@@ -563,7 +653,7 @@ static int clock_submenu_sel = 0;
+@@ -563,7 +680,7 @@ static int clock_submenu_sel = 0;
  
  static void disp_clock_submenu()
  {
@@ -1465,7 +1515,7 @@ index 7b4b3c6..e14c581 100644
      if (clock_submenu_sel == 0)
          fb_putchar_small('>', 0, 0);
      else
-@@ -591,6 +681,7 @@ static void clock_submenu_select()
+@@ -591,6 +708,7 @@ static void clock_submenu_select()
          btn_onLongPress(KEY2, enter_clock_submenu);
      } else {
          // Enter Stopwatch mode
@@ -1473,7 +1523,7 @@ index 7b4b3c6..e14c581 100644
          sw_state = SW_STOPPED;
          sw_centiseconds = 0;
          disp_stopwatch();
-@@ -605,7 +696,7 @@ static int security_submenu_sel = 0;  // 0 = ENABLE, 1 = DISABLE
+@@ -605,7 +723,7 @@ static int security_submenu_sel = 0;  // 0 = ENABLE, 1 = DISABLE
  
  static void disp_security_submenu()
  {
@@ -1482,7 +1532,7 @@ index 7b4b3c6..e14c581 100644
      if (security_submenu_sel == 0)
          fb_putchar_small('>', 0, 0);
      else
-@@ -625,12 +716,13 @@ static void security_submenu_select()
+@@ -625,12 +743,13 @@ static void security_submenu_select()
  {
      badge_cfg.ble_security = (security_submenu_sel == 0) ? 1 : 0;
      cfg_writeflash_def(&badge_cfg);
@@ -1497,7 +1547,7 @@ index 7b4b3c6..e14c581 100644
  #if HW_KEY_COUNT == 4
      auxbtn_onOnePress(KEY4, return_to_menu);  // restore KEY4 to normal
  #else
-@@ -684,7 +776,7 @@ static int games_submenu_sel = 0;
+@@ -684,7 +803,7 @@ static int games_submenu_sel = 0;
  
  static void disp_games_submenu(void)
  {
@@ -1506,7 +1556,7 @@ index 7b4b3c6..e14c581 100644
      static const char *labels[] = { "SNAKE", "FLAPPY", "PONG" };
  
      int page  = games_submenu_sel / 2;
-@@ -749,9 +841,11 @@ void return_to_menu()
+@@ -749,9 +868,11 @@ void return_to_menu()
      tmos_stop_task(common_taskid, CLOCK_TICK);
      tmos_stop_task(common_taskid, STOPWATCH_TICK);
      sw_state = SW_STOPPED;
@@ -1518,7 +1568,7 @@ index 7b4b3c6..e14c581 100644
      btn_onOnePress(KEY1, menu_up);
      btn_onOnePress(KEY2, menu_down);
  #if HW_KEY_COUNT == 4
-@@ -766,23 +860,66 @@ void return_to_menu()
+@@ -766,29 +887,84 @@ void return_to_menu()
      disp_menu();
  }
  
@@ -1593,7 +1643,25 @@ index 7b4b3c6..e14c581 100644
  			DelayMs(500);
  			return;
  		}
-@@ -796,29 +933,124 @@ void clean_bmlist()
+ 	}
+ }
+ 
++static void low_batt_off()
++{
++	streaming_enabled = 0;
++	stop_all_animation();
++	fb_clear();
++	disp_bat_stt(-1, 15, 2);	/* 13x7 icon, centred */
++	fb_lock = 0;
++	DelayMs(2000);
++	mode = POWER_OFF;
++	poweroff();
++}
++
+ void clean_bmlist()
+ {
+ 	bm_t *curr_bm = bmlist_current();
+@@ -796,29 +972,124 @@ void clean_bmlist()
  		bmlist_drop(curr_bm->next);
  }
  
@@ -1720,7 +1788,7 @@ index 7b4b3c6..e14c581 100644
  {
      if (badge_cfg.reset_rx) {
          SYS_ResetExecute();
-@@ -827,9 +1059,12 @@ void handle_after_rx()
+@@ -827,9 +1098,12 @@ void handle_after_rx()
          tmos_stop_task(common_taskid, STOPWATCH_TICK);
          sw_state = SW_STOPPED;
          clock_active = 0;
@@ -1736,7 +1804,7 @@ index 7b4b3c6..e14c581 100644
      }
  }
  
-@@ -840,12 +1075,15 @@ int main()
+@@ -840,12 +1114,15 @@ int main()
  	debug_init();
  	PRINT("\nDebug console is on UART%d\n", DEBUG);
  
@@ -1755,7 +1823,7 @@ index 7b4b3c6..e14c581 100644
  	TMR0_ITCfg(ENABLE, TMR0_3_IT_CYC_END);
  	PFIC_EnableIRQ(TMR0_IRQn);
  
-@@ -863,19 +1101,36 @@ int main()
+@@ -863,19 +1140,36 @@ int main()
  #endif
  
  	power_init();
@@ -1794,7 +1862,7 @@ index 7b4b3c6..e14c581 100644
  
  	spawn_tasks();
  	btn_init_task();
-@@ -887,10 +1142,12 @@ int main()
+@@ -887,10 +1181,12 @@ int main()
  	pong_init();
  	stop_all_animation();
  
@@ -1809,7 +1877,7 @@ index 7b4b3c6..e14c581 100644
  	}
  }
  
-@@ -899,20 +1156,36 @@ __HIGH_CODE
+@@ -899,20 +1195,36 @@ __HIGH_CODE
  void TMR0_IRQHandler(void)
  {
  	static int i;
