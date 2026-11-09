@@ -705,6 +705,8 @@ async function autoReconnect(force) {
 }
 
 async function detach() {
+  // a stream left on hides the slots until the next reboot or the menu
+  if (live && link) await run("live off", liveOff).catch(() => {});
   stopLive();
   lastDev = null; isLost = false;
   if (link) { const l = link; link = null; await l.close(); }
@@ -1031,7 +1033,7 @@ $("btnAdd").onclick = () => {
 };
 $("font").onchange = () => { store.set("font", $("font").value); select(selected, false); };
 $("btnSend").onclick = () => run("upload", async l => {
-  stopLive();
+  await liveOff(l);
   const data = slots.map(s => ({ ...s, data: slotData(s) }));
   await l.upload(legacyPacket(data, l.yearByte()));
   log(`sent ${data.length} message${data.length > 1 ? "s" : ""}`);
@@ -1106,6 +1108,14 @@ async function pushLive() {
   liveSending = false;
 }
 
+// End Live on the badge too, from inside run(): otherwise it keeps showing the
+// last frame over the slots.
+async function liveOff(l) {
+  if (!live) return;
+  stopLive();
+  try { await l.ng([CMD_STREAM_SET, 1]); } catch {}
+}
+
 function stopLive(send) {
   if (!live) return;
   live = false; $("btnLive").classList.remove("on");
@@ -1137,7 +1147,7 @@ $("btnClear").onclick = () => { pad = pad.map(r => r.map(() => false)); drawPad(
 $("btnFill").onclick = () => { pad = pad.map(r => r.map(() => true)); drawPad(); };
 $("btnInvert").onclick = () => { pad = pad.map(r => r.map(v => !v)); drawPad(); };
 $("btnPadSend").onclick = () => run("upload", async l => {
-  stopLive();
+  await liveOff(l);
   await l.upload(legacyPacket([{ data: toBlocks(pad, false), mode: 4, speed: 4, blink: false, border: false }], l.yearByte()));
   log("drawing sent (replaces all slots)");
 });
