@@ -420,6 +420,17 @@ shows every packet. Over USB it also sets the
 battery (firmware 1.6.0, over all three connections) and sets the charging
 screen (firmware 1.3.0 and later).
 
+A slot holds text or a drawing. **draw** turns a slot's text into the very
+pixels it was showing, so you can touch them up on the pad and the badge looks
+the same; **text** turns it back, keeping the words you had. **→ slot N** puts
+the pad into the message you have selected. The panel reads and writes the same
+[`config.toml`](#your-slots-configtoml) `badgetool.py upload` takes, drawings
+(`pixels`) included, so you can build your slots in either and carry them over.
+A message that points at an image file stays empty, because a browser cannot
+read that file from the path in the config, but its name survives an export.
+**Save** keeps a copy of your slots in the browser to come back to, next to the
+one it keeps as you type.
+
 Both browser APIs need a secure context: `localhost`, a `file://` page or
 `https://`. The GitHub Pages copy is HTTPS, so it works from a phone as it
 is. The panel is a single file, so you can also put `index.html` on your own
@@ -428,8 +439,9 @@ warning once and Web Bluetooth works. Factory-firmware
 badges get text and images only. Over Bluetooth, firmware 1.5.0 shows the full
 status (voltage, clock, settings) like USB does; older firmware shows only the
 battery percentage and firmware version, as `badgetool.py` does. Below the
-messages, "Show on the badge now" jumps to a slot (empty slots are greyed out;
-firmware 1.5.0 and later).
+settings, "Show on the badge now" jumps to a slot (empty slots are greyed out;
+firmware 1.5.0 and later); drag across those buttons and the badge follows your
+finger, at up to ten jumps a second.
 
 `index.html` is built from `panel.src.html` by `python build.py`, which copies
 the fonts out of `badgetool.py`. Edit the source, then rebuild.

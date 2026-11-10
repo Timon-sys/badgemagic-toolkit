@@ -16,6 +16,7 @@ body { margin: 0; background: var(--bg); color: var(--text);
 main { max-width: 860px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
 header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 h1 { font-size: 18px; margin: 0; flex: 1; letter-spacing: .02em; }
+h2.later:not(:first-child) { margin-top: 14px; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 10px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
 button, select, input[type=text] { font: inherit; color: var(--text); background: #20232a;
@@ -52,6 +53,8 @@ label.chk { display: inline-flex; gap: 4px; align-items: center; }
 .set:last-child { border-bottom: 0; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { border: 0; border-radius: 0; padding: 5px 11px; }
+#showSlot { touch-action: none; }  /* drag across it without scrolling the page */
+#showSlot button { min-width: 34px; }
 #log { font: 12px/1.5 ui-monospace, Consolas, monospace; color: var(--dim); max-height: 110px;
   overflow: auto; white-space: pre-wrap; }
 .hint { font-size: 12px; color: var(--dim); }
@@ -107,10 +110,15 @@ label.chk { display: inline-flex; gap: 4px; align-items: center; }
       <button id="btnSend" class="primary" disabled>Send to badge</button>
     </div>
     <div id="slots"></div>
-    <div class="row" id="showRow" style="margin-top:10px; display:none">
-      <span class="hint">Show on the badge now:</span>
-      <span class="seg" id="showSlot"></span>
-      <span class="hint grow" id="showHint"></span>
+    <div class="row" style="margin-top:10px">
+      <span class="hint">config.toml:</span>
+      <button id="btnTomlIn" title="load slots from a badgetool config.toml">Import…</button>
+      <button id="btnTomlOut" title="save these slots as a config.toml for badgetool.py">Export</button>
+      <span class="hint" style="margin-left:12px">saved copy:</span>
+      <button id="btnStash" title="keep a copy of these slots in this browser">Save</button>
+      <button id="btnStashLoad" title="bring back the kept copy">Load</button>
+      <span class="hint grow" id="stashHint"></span>
+      <input type="file" id="tomlFile" accept=".toml,.txt,text/plain" hidden>
     </div>
   </section>
 
@@ -118,6 +126,7 @@ label.chk { display: inline-flex; gap: 4px; align-items: center; }
     <div class="row" style="margin-bottom:8px">
       <h2 class="grow" style="margin:0">Draw</h2>
       <button id="btnLive" disabled>Live</button>
+      <button id="btnPadTo" title="put this drawing into the selected message (its text is kept)">→ slot 1</button>
       <button id="btnPadSend" disabled>Send as slot</button>
     </div>
     <canvas id="pad" width="880" height="220"></canvas>
@@ -156,13 +165,21 @@ label.chk { display: inline-flex; gap: 4px; align-items: center; }
         <button id="btnForget" data-need="pin">Forget paired devices</button></div>
     </section>
     <section class="card">
-      <h2>Power</h2>
+      <div id="showBox" hidden>
+        <h2>Show on the badge now</h2>
+        <div class="row">
+          <span class="seg" id="showSlot"></span>
+          <span class="hint grow" id="showHint"></span>
+        </div>
+        <p class="hint">Jumps to a slot from wherever the badge is. Empty slots are greyed out.</p>
+      </div>
+      <h2 class="later">Power</h2>
       <div class="row">
         <button id="btnReboot" data-need="custom">Reboot</button>
         <button id="btnOff" class="danger" data-need="custom">Power off</button>
       </div>
       <p class="hint">Power off: the top button switches it back on.</p>
-      <h2 style="margin-top:14px">Log</h2>
+      <h2 class="later">Log</h2>
       <div id="log"></div>
     </section>
   </div>
@@ -637,6 +654,7 @@ function run(label, fn) {
 }
 
 async function attach(l) {
+  slotWant = slotShown = null;
   if (attaching) return;
   attaching = true; refreshUi();
   try {
@@ -858,7 +876,7 @@ function refreshUi() {
     else if (link.kind === "ble" && custom && s.mv == null) st.push(stat("more", '<small>clock & settings over Bluetooth need firmware 1.5.0</small>'));
   }
   $("stats").innerHTML = st.join("");
-  $("showRow").style.display = !link || !custom || filled == null ? "none" : "";  // .row sets display, so not `hidden`
+  $("showBox").hidden = !link || !custom || filled == null;
   $("showSlot").querySelectorAll("button").forEach(b => {
     b.disabled = !filled || !filled.includes(+b.dataset.v);
     b.title = b.disabled ? "empty" : "show slot " + (+b.dataset.v + 1);
@@ -939,19 +957,79 @@ $("btnForget").onclick = () => {
     pinCommand("paired devices forgotten", [CMD_MISC, MISC_FORGET_BONDS]);
 };
 for (let i = 0; i < 8; i++) $("showSlot").insertAdjacentHTML("beforeend", `<button data-v="${i}">${i + 1}</button>`);
-$("showSlot").onclick = e => {
-  const v = e.target.dataset.v;
-  if (v == null) return;
+// Drag across the buttons and the badge follows your finger. At most 10 jumps a
+// second, and only ever the newest one: a fast swipe would otherwise queue a
+// command per button and the badge would still be working through them long
+// after you let go. The status read that follows a jump waits for the end.
+const SLOT_EVERY_MS = 100;
+let slotWant = null, slotShown = null, slotBusy = false, slotAt = 0, slotRest = false;
+
+// force: a fresh press always goes out, even for the slot we last sent. The
+// badge's own button steps slots too, so what we last sent is not where it is.
+// Repeats are only swallowed while the finger is sliding across the buttons.
+function wantSlot(n, force) {
+  if (n === slotWant && !force) return;
+  if (force) slotShown = null;
+  slotWant = n;
+  pumpSlot();
+}
+
+function pumpSlot() {
+  if (slotBusy || !link) return;
+  if (slotWant === null || slotWant === slotShown) return void restSlot();
+  const wait = SLOT_EVERY_MS - (Date.now() - slotAt);
+  if (wait > 0) return void setTimeout(pumpSlot, wait);
+  const n = slotWant;
+  slotShown = n; slotBusy = true; slotAt = Date.now();
   run("show slot", async l => {
-    const r = await l.showSlot(+v);
+    const r = await l.showSlot(n);
     filled = r.filled;
-    $("showHint").textContent = r.result === 0 ? `slot ${+v + 1}; the button steps on from there`
-      : r.result === "empty" ? `slot ${+v + 1} is empty`
+    $("showHint").textContent = r.result === 0 ? `slot ${n + 1}; the button steps on from there`
+      : r.result === "empty" ? `slot ${n + 1} is empty`
       : r.result === "busy" ? "busy: a game, a live picture or switched off" : "badge said " + r.result;
-    if (r.result === 0) { try { status = await l.status(); } catch {} }
     refreshUi();
+  }).catch(() => {}).then(() => { slotBusy = false; pumpSlot(); });
+}
+
+// once the finger is up and the last jump is through, catch the status up
+function restSlot() {
+  if (!slotRest || slotBusy) return;
+  slotRest = false;
+  run(null, async l => { status = await l.status(); refreshUi(); }).catch(() => {});
+}
+
+{
+  const seg = $("showSlot");
+  const at = (x, y) => {
+    const el = document.elementFromPoint(x, y);
+    const b = el && el.closest && el.closest("#showSlot button");
+    return b && !b.disabled ? +b.dataset.v : null;
+  };
+  let dragging = false;
+  seg.addEventListener("pointerdown", e => {
+    const n = at(e.clientX, e.clientY);
+    if (n === null) return;
+    dragging = true; slotRest = true;
+    try { seg.setPointerCapture(e.pointerId); } catch {}
+    e.preventDefault();          // no text selection, no page scroll while dragging
+    wantSlot(n, true);
   });
-};
+  seg.addEventListener("pointermove", e => {
+    if (!dragging) return;
+    const n = at(e.clientX, e.clientY);
+    if (n !== null) wantSlot(n);
+  });
+  const stop = e => {
+    if (!dragging) return;
+    dragging = false;
+    try { seg.releasePointerCapture(e.pointerId); } catch {}
+    pumpSlot();
+  };
+  seg.addEventListener("pointerup", stop);
+  seg.addEventListener("pointercancel", stop);
+  // a pointer press already did its work above; this is Enter or Space on a button
+  seg.onclick = e => { if (e.detail === 0 && e.target.dataset.v != null) { slotRest = true; wantSlot(+e.target.dataset.v, true); } };
+}
 $("btnTime").onclick = () => run("time", async l => { await l.ng(timePayload()); log("clock set"); });
 $("btnReboot").onclick = () => run("reboot", rebootAndRestore);
 $("btnOff").onclick = () => run("power off", async l => {
@@ -986,7 +1064,27 @@ let slots = store.get("slots", [{ text: "Hello!", mode: 0, speed: 4, blink: fals
 let selected = 0;
 $("font").value = store.get("font", "thin");
 
-function slotData(s) { return textBlocks(s.text || " ", $("font").value); }
+function slotData(s) {
+  if (s.pixels != null) return toBlocks(pixelRows(s.pixels), false);
+  return textBlocks(s.text || " ", $("font").value);
+}
+
+// config.toml 'pixels': one line per row, '#' is lit, anything else dark.
+// Fewer than 11 rows are centred, like badgetool.py does it.
+function pixelRows(src) {
+  let lines = String(src).split("\n");
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  if (!lines.length) lines = [""];
+  lines = lines.slice(0, ROWS);
+  const w = Math.max(1, ...lines.map(l => l.length));
+  const img = lines.map(l => Array.from({ length: w }, (_, x) => l[x] === "#"));
+  const blank = () => Array(w).fill(false);
+  const top = (ROWS - img.length) >> 1;
+  return [...Array.from({ length: top }, blank), ...img,
+          ...Array.from({ length: ROWS - img.length - top }, blank)];
+}
+
+const padPixels = () => pad.map(r => r.map(v => v ? "#" : ".").join("")).join("\n");
 
 function renderSlots() {
   const box = $("slots");
@@ -994,10 +1092,15 @@ function renderSlots() {
   slots.forEach((s, i) => {
     const el = document.createElement("div");
     el.className = "slot" + (i === selected ? " sel" : "");
+    const pix = s.pixels != null, img = !pix && !!s.image;
     el.innerHTML = `<span class="n">${i + 1}</span>
-      <input type="text" value="${esc(s.text)}" placeholder="text">
+      <input type="text" value="${esc(pix || img ? "" : s.text || "")}" ${pix || img ? "disabled" : ""}
+             placeholder="${pix ? "a drawing, not text" : img ? "image " + esc(s.image) + " (not readable here)" : "text"}">
       <button title="remove" ${slots.length < 2 ? "disabled" : ""}>✕</button>
       <div class="opts">
+        ${pix ? '<button class="toPad" title="put this drawing on the draw pad">edit</button>' : ""}
+        ${pix || img ? '<button class="toText" title="drop the drawing and type text again">text</button>'
+                     : '<button class="toDraw" title="turn this text into a drawing on the draw pad">draw</button>'}
         <select>${SLOT_MODES.map((m, j) => `<option value="${j}" ${j === s.mode ? "selected" : ""}>${m}</option>`).join("")}</select>
         <span>speed</span><input type="range" min="0" max="7" value="${s.speed}"><span>${s.speed}</span>
         <label class="chk"><input type="checkbox" ${s.blink ? "checked" : ""}>blink</label>
@@ -1014,6 +1117,15 @@ function renderSlots() {
     rng.oninput = () => { s.speed = +rng.value; rng.nextElementSibling.textContent = rng.value; changed(); };
     blink.onchange = () => { s.blink = blink.checked; changed(); };
     border.onchange = () => { s.border = border.checked; changed(); };
+    const btn = c => el.querySelector("." + c);
+    if (btn("toPad")) btn("toPad").onclick = ev => { ev.stopPropagation(); select(i, true); padFromSlot(i); };
+    if (btn("toDraw")) btn("toDraw").onclick = ev => { ev.stopPropagation(); textToDrawing(i); };
+    if (btn("toText")) btn("toText").onclick = ev => {
+      ev.stopPropagation();
+      delete s.pixels; delete s.image; delete s.invert;
+      store.set("slots", slots); renderSlots(); select(i, false);
+      log(`slot ${i + 1} takes text again`);
+    };
     del.onclick = ev => { ev.stopPropagation(); slots.splice(i, 1); selected = Math.min(selected, slots.length - 1); store.set("slots", slots); renderSlots(); select(selected, false); };
     box.appendChild(el);
   });
@@ -1021,8 +1133,32 @@ function renderSlots() {
 
 function select(i, rerender) {
   if (i !== selected) { selected = i; if (rerender) document.querySelectorAll(".slot").forEach((e, j) => e.classList.toggle("sel", j === i)); }
+  $("btnPadTo").textContent = "→ slot " + (selected + 1);
   const s = slots[selected];
   sim.set(blocksToRows(slotData(s)), s);
+}
+
+// The pad is 44 columns, a slot can be wider; put what fits on the pad.
+function padFromSlot(i) {
+  const rows = pixelRows(slots[i].pixels);
+  pad = Array.from({ length: ROWS }, (_, y) => Array.from({ length: COLS },
+        (_, x) => !!(rows[y] && rows[y][x])));
+  drawPad();
+  $("pad").scrollIntoView({ block: "center", behavior: "smooth" });
+  log(rows[0].length > COLS
+      ? `slot ${i + 1} is ${rows[0].length} columns wide; the pad holds the first ${COLS}`
+      : `slot ${i + 1} is on the draw pad; "→ slot ${i + 1}" puts it back`);
+}
+
+// Text becomes the very pixels it was showing, so the badge looks the same.
+function textToDrawing(i) {
+  const s = slots[i];
+  const rows = blocksToRows(textBlocks(s.text || " ", $("font").value));
+  if (rows[0].length > COLS)
+    return log(`"${s.text}" is ${rows[0].length} columns wide, wider than the ${COLS}-column draw pad`);
+  s.pixels = rows.map(r => r.map(v => v ? "#" : ".").join("")).join("\n");
+  store.set("slots", slots); renderSlots(); select(i, false);
+  padFromSlot(i);
 }
 
 $("btnAdd").onclick = () => {
@@ -1032,6 +1168,164 @@ $("btnAdd").onclick = () => {
   document.querySelectorAll(".slot input[type=text]")[selected].focus();
 };
 $("font").onchange = () => { store.set("font", $("font").value); select(selected, false); };
+$("btnPadTo").onclick = () => {
+  const s = slots[selected];
+  delete s.image; delete s.invert;
+  s.pixels = padPixels();
+  store.set("slots", slots); renderSlots(); select(selected, false);
+  log(`the drawing is slot ${selected + 1}` + (s.text ? `; its text "${s.text}" is kept` : ""));
+};
+
+// --- config.toml, the same file badgetool.py uploads
+
+// Enough TOML for that file: [[message]] tables holding strings (including the
+// ''' blocks 'pixels' uses), integers and booleans. Other tables are skipped.
+function parseToml(src) {
+  const lines = src.replace(/^\uFEFF/, "").split(/\r?\n/);
+  const out = { message: [] };
+  let cur = out;  // top-level keys; a [table] we don't know swaps in a scratch one
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line[0] === "#") continue;
+    if (line.startsWith("[[")) {
+      const end = line.indexOf("]]");
+      if (end < 0) throw new Error(`line ${i + 1}: unfinished [[table]]`);
+      cur = {};
+      if (line.slice(2, end).trim() === "message") out.message.push(cur);
+      continue;
+    }
+    if (line[0] === "[") { cur = {}; continue; }
+    const eq = line.indexOf("=");
+    if (eq < 1) throw new Error(`line ${i + 1}: expected key = value`);
+    const v = tomlValue(line.slice(eq + 1).trim(), lines, i);
+    const key = line.slice(0, eq).trim().replace(/^["']|["']$/g, "");
+    if (!(cur === out && key === "message")) cur[key] = v.value;
+    i = v.line;
+  }
+  return out;
+}
+
+function tomlValue(rest, lines, i) {
+  const ml = rest.slice(0, 3);
+  if (ml === "'''" || ml === '"""') {
+    const body = rest.slice(3), first = body.indexOf(ml);
+    if (first >= 0) return { value: body.slice(0, first), line: i };
+    const parts = body === "" ? [] : [body];  // a newline right after the opener drops out
+    for (i++; i < lines.length; i++) {
+      const c = lines[i].indexOf(ml);
+      if (c < 0) { parts.push(lines[i]); continue; }
+      if (c > 0) parts.push(lines[i].slice(0, c));
+      return { value: parts.join("\n"), line: i };
+    }
+    throw new Error(`unfinished ${ml} string`);
+  }
+  if (rest[0] === "'") {
+    const end = rest.indexOf("'", 1);
+    if (end < 0) throw new Error("unfinished ' string");
+    return { value: rest.slice(1, end), line: i };
+  }
+  if (rest[0] === '"') {
+    let s = "", j = 1;
+    for (; j < rest.length && rest[j] !== '"'; j++) {
+      if (rest[j] !== "\\") { s += rest[j]; continue; }
+      const c = rest[++j];
+      if (c === "u") { s += String.fromCharCode(parseInt(rest.substr(j + 1, 4), 16)); j += 4; }
+      else s += c === "n" ? "\n" : c === "t" ? "\t" : c === "r" ? "\r" : c;
+    }
+    if (j >= rest.length) throw new Error('unfinished " string');
+    return { value: s, line: i };
+  }
+  const bare = rest.split("#")[0].trim();
+  if (bare === "true" || bare === "false") return { value: bare === "true", line: i };
+  return { value: bare !== "" && !isNaN(Number(bare)) ? Number(bare) : bare, line: i };
+}
+
+function slotsFromToml(src) {
+  const cfg = parseToml(src), msgs = cfg.message;
+  const notes = [];
+  if (!msgs.length) throw new Error("no [[message]] blocks in it");
+  if (msgs.length > 8) throw new Error(`${msgs.length} messages, the badge has 8 slots`);
+  const out = msgs.map((m, i) => {
+    const mode = SLOT_MODES.indexOf(String(m.mode === undefined ? "left" : m.mode));
+    if (mode < 0) throw new Error(`message ${i + 1}: mode "${m.mode}" is not one of ${SLOT_MODES.join(", ")}`);
+    const speed = m.speed === undefined ? 4 : m.speed;
+    if (!Number.isInteger(speed) || speed < 0 || speed > 7)
+      throw new Error(`message ${i + 1}: speed is 0 to 7, not ${JSON.stringify(m.speed)}`);
+    const s = { text: "", mode, speed, blink: !!m.blink, border: !!m.border };
+    if (m.pixels !== undefined) {
+      const rows = String(m.pixels).replace(/\s+$/, "").split("\n");
+      if (rows.length > ROWS) throw new Error(`message ${i + 1}: pixels has ${rows.length} rows, the badge has ${ROWS}`);
+      s.pixels = rows.join("\n");
+    } else if (m.image !== undefined) {
+      s.image = String(m.image);
+      if (m.invert) s.invert = true;
+      notes.push(`slot ${i + 1}: image "${s.image}" stays empty, a browser cannot read it from the file`);
+    } else {
+      s.text = String(m.text === undefined ? "" : m.text);
+    }
+    return s;
+  });
+  if (cfg.brightness !== undefined) notes.push("the file's brightness was ignored: set it under Settings");
+  return { slots: out, notes };
+}
+
+function tomlFromSlots(list) {
+  const str = s => '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n") + '"';
+  let out = "# written by the badge web panel, upload it with: badgetool.py upload config.toml\n";
+  for (const s of list) {
+    out += "\n[[message]]\n";
+    if (s.pixels != null) out += "pixels = '''\n" + s.pixels + "\n'''\n";
+    else if (s.image) out += "image = " + str(s.image) + "\n" + (s.invert ? "invert = true\n" : "");
+    else out += "text = " + str(s.text || "") + "\n";
+    out += "mode = " + str(SLOT_MODES[s.mode] || "left") + "\n";
+    out += `speed = ${s.speed}\nblink = ${!!s.blink}\nborder = ${!!s.border}\n`;
+  }
+  return out;
+}
+
+function useSlots(list, what) {
+  slots = list; selected = 0; store.set("slots", slots);
+  renderSlots(); select(0, false);
+  log(`${slots.length} slot${slots.length > 1 ? "s" : ""} ${what}`);
+}
+
+$("btnTomlIn").onclick = () => $("tomlFile").click();
+$("tomlFile").onchange = async e => {
+  const f = e.target.files[0];
+  e.target.value = "";  // so picking the same file again still fires
+  if (!f) return;
+  try {
+    const r = slotsFromToml(await f.text());
+    useSlots(r.slots, "loaded from " + f.name);
+    r.notes.forEach(log);
+  } catch (err) { log(f.name + ": " + err.message); }
+};
+$("btnTomlOut").onclick = () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([tomlFromSlots(slots)], { type: "text/plain" }));
+  a.download = "config.toml";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  log(`${slots.length} slot${slots.length > 1 ? "s" : ""} written to config.toml`);
+};
+
+// The slots you edit are kept in this browser anyway; this is a copy to come
+// back to, so trying something out does not lose them.
+function stashHint() {
+  const v = store.get("saved", null);
+  $("stashHint").textContent = v && v.at ? "kept " + new Date(v.at).toLocaleString() : "nothing kept yet";
+  $("btnStashLoad").disabled = !v;
+}
+$("btnStash").onclick = () => {
+  store.set("saved", { at: Date.now(), slots });
+  stashHint();
+  log(`${slots.length} slot${slots.length > 1 ? "s" : ""} kept in this browser`);
+};
+$("btnStashLoad").onclick = () => {
+  const v = store.get("saved", null);
+  if (!v || !v.slots || !v.slots.length) return log("nothing kept in this browser yet");
+  useSlots(v.slots, "brought back from " + new Date(v.at).toLocaleString());
+};
 $("btnSend").onclick = () => run("upload", async l => {
   await liveOff(l);
   const data = slots.map(s => ({ ...s, data: slotData(s) }));
@@ -1054,21 +1348,39 @@ function drawLeds(canvas, frame, dimAll) {
   ctx.shadowBlur = 0;
 }
 
-// rough simulation of the slot animations; good enough to judge text width and speed
+// Rough simulation of the slot animations: good enough to judge width and speed.
+// Widths arrive in 8-column blocks, so a picture that fills the display is 48
+// columns with 4 blank ones. The firmware's page_count() drops that last blank
+// part-page and get_x_offset() centres only a picture that fits in one page, so
+// follow both here, or the preview scrolls things the badge holds still.
 const sim = {
   rows: null, slot: null, t: 0, last: 0,
   set(rows, slot) { this.rows = rows; this.slot = slot; this.t = 0; },
+  lit(x) { for (let y = 0; y < ROWS; y++) if (this.rows[y][x]) return true; return false; },
+  pages() {
+    const w = this.rows[0].length, n = Math.ceil(w / COLS);
+    if (n <= 1 || w % COLS === 0) return n;
+    for (let x = (n - 1) * COLS; x < w; x++) if (this.lit(x)) return n;
+    return n - 1;
+  },
+  centerX() {
+    if (this.rows[0].length > COLS) return 0;   // more than one page: hard left
+    let content = 0;
+    for (let x = 0; x < this.rows[0].length; x++) if (this.lit(x)) content = x + 1;
+    return content < COLS ? (COLS - content) >> 1 : 0;
+  },
   frame() {
     const R = this.rows, s = this.slot, w = R[0].length;
     const f = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
     const mode = SLOT_MODES[s.mode];
     const put = (dx, dy) => { for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) { const sx = x - dx, sy = y - dy; if (sx >= 0 && sx < w && sy >= 0 && sy < ROWS && R[sy][sx]) f[y][x] = true; } };
-    const centerX = w < COLS ? (COLS - w) >> 1 : 0;
-    const scroll = w + COLS;
-    if (mode === "left" || mode === "fast" || (w > COLS && mode !== "right")) put(COLS - (this.t % scroll), 0);
+    const centerX = this.centerX(), pages = this.pages();
+    const scroll = w + COLS;   // ani_scroll_x counts the stored width, padding included
+    if (mode === "left" || mode === "fast") put(COLS - (this.t % scroll), 0);
     else if (mode === "right") put((this.t % scroll) - w, 0);
     else if (mode === "up") put(centerX, ROWS - (this.t % (ROWS * 3)));
     else if (mode === "down") put(centerX, (this.t % (ROWS * 3)) - ROWS);
+    else if (pages > 1) put(-COLS * (Math.floor(this.t / COLS) % pages), 0);  // ani_fixed pages
     else put(centerX, 0);
     if (s.border) for (let x = 0; x < COLS; x++) { f[0][x] = f[ROWS - 1][x] = (x + this.t) % 4 < 2; }
     return f;
@@ -1173,7 +1485,7 @@ $("imgFile").onchange = async () => {
 watch = store.get("watch", true);
 traffic.showLog = store.get("trafLog", true);
 $("btnTrafLog").classList.toggle("on", traffic.showLog); traffic.render();
-renderSlots(); select(0, false); drawPad(); refreshUi(); requestAnimationFrame(tick);
+renderSlots(); select(0, false); drawPad(); stashHint(); refreshUi(); requestAnimationFrame(tick);
 </script>
 </body>
 </html>
