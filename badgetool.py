@@ -1085,20 +1085,54 @@ def cmd_slot(a):
         sys.exit(f"the badge said {res}")
 
 
-def _ms_range(text, step, name):
-    """'7.5-15' or '15' (ms) -> (min, max) in units of step ms"""
+# The link values as people type them: (what, unit, lowest, highest, step).
+# Ranges are the Bluetooth Core spec's; ble_link_check() in the firmware
+# checks the same.
+LINK_RANGES = {
+    "interval": ("connection interval", "ms", 7.5, 4000, 1.25),
+    "latency": ("latency", "", 0, 499, 1),
+    "timeout": ("supervision timeout", "s", 0.1, 32, 0.01),
+    "adv": ("advertising interval", "ms", 20, 10240, 0.625),
+}
+
+
+def _range_text(key):
+    what, unit, lo, hi, step = LINK_RANGES[key]
+    u = " " + unit if unit else ""
+    return f"{lo:g} to {hi:g}{u}" + (f", in steps of {step:g}{u}" if step != 1 else "")
+
+
+def _steps(text, key):
+    """One value in the range of LINK_RANGES[key] -> whole steps; ValueError
+    with a readable message otherwise."""
+    what, unit, lo, hi, step = LINK_RANGES[key]
     try:
-        lo, _, hi = text.partition("-")
-        lo, hi = float(lo), float(hi or lo)
+        x = float(text)
     except ValueError:
-        sys.exit(f"{name}: give milliseconds like 15 or 7.5-15")
-    out = []
-    for x in (lo, hi):
-        u = round(x / step)
-        if abs(u * step - x) > 1e-6:
-            sys.exit(f"{name}: {x:g} ms is not a multiple of {step:g} ms")
-        out.append(u)
-    return tuple(out)
+        raise ValueError(f"{what}: '{text}' is not a number ({_range_text(key)})") from None
+    if not lo - 1e-9 <= x <= hi + 1e-9:
+        raise ValueError(f"{what}: {x:g}{' ' + unit if unit else ''} is out of range ({_range_text(key)})")
+    u = round(x / step)
+    if abs(u * step - x) > 1e-6:
+        raise ValueError(f"{what}: {x:g} is not a {'whole number' if step == 1 else f'multiple of {step:g} {unit}'}")
+    return u
+
+
+def _range_steps(text, key):
+    """'7.5-15' or '15' -> (min, max) in steps; one value means min = max."""
+    lo, _, hi = text.partition("-")
+    a, b = _steps(lo.strip(), key), _steps((hi or lo).strip(), key)
+    if a > b:
+        raise ValueError(f"{LINK_RANGES[key][0]}: the first value is above the second")
+    return a, b
+
+
+def _ms_range(text, step, name):
+    """CLI: 'interval' / 'advertising' option text -> (min, max) in steps."""
+    try:
+        return _range_steps(text, "interval" if name == "interval" else "adv")
+    except ValueError as e:
+        sys.exit(str(e))
 
 
 def cmd_link(a):
@@ -1114,7 +1148,9 @@ def cmd_link(a):
         b.close()
         sys.exit(str(e) if "no reply" not in str(e)
                  else "this needs firmware 1.7.0 or later ('badgetool.py flash')")
-    if a.preset == "default":
+    if getattr(a, "_values", None):  # the menu's custom section, checked already
+        new = dict(a._values)
+    elif a.preset == "default":
         new = dict(LINK_DEFAULT)
     else:
         new = dict(cur)
@@ -1122,10 +1158,14 @@ def cmd_link(a):
             new["conn_min"], new["conn_max"] = LINK_PRESETS[a.preset]
     if a.interval:
         new["conn_min"], new["conn_max"] = _ms_range(a.interval, 1.25, "interval")
-    if a.latency is not None:
-        new["latency"] = a.latency
-    if a.timeout is not None:
-        new["timeout"] = round(a.timeout * 100)
+    try:
+        if a.latency is not None:
+            new["latency"] = _steps(str(a.latency), "latency")
+        if a.timeout is not None:
+            new["timeout"] = _steps(str(a.timeout), "timeout")
+    except ValueError as e:
+        b.close()
+        sys.exit(str(e))
     if a.adv:
         new["adv_min"], new["adv_max"] = _ms_range(a.adv, 0.625, "advertising")
     if a.tx is not None:
@@ -1649,14 +1689,71 @@ def menu_link():
     if c in ("fast", "default", "saver"):
         cmd_link(ns(**{**keep, "preset": c}))
     elif c == "custom":
-        print("enter keeps the current value")
-        new = dict(keep)
-        new["interval"] = input("connection interval ms, e.g. 15 or 7.5-15: ").strip() or None
-        new["latency"] = int(v) if (v := input("latency 0-499: ").strip()) else None
-        new["timeout"] = float(v) if (v := input("supervision timeout s, 0.1-32: ").strip()) else None
-        new["adv"] = input("advertising interval ms, e.g. 100 or 62.5-125: ").strip() or None
-        new["tx"] = int(v) if (v := input("radio power dBm (" + " ".join(map(str, TX_LEVELS)) + "): ").strip()) else None
-        cmd_link(ns(**new))
+        b = open_one(ns())
+        try:
+            cur = b.link()[1]
+        finally:
+            b.close()
+        v = dict(cur)
+
+        def field(label, now, rule, parse):
+            """Ask until the answer parses; enter keeps the current value."""
+            while True:
+                t = input(f"\n{label}\n  now {now}; allowed: {rule}\n  new value (enter = keep): ").strip()
+                if not t:
+                    return None
+                try:
+                    return parse(t)
+                except ValueError as e:
+                    print("  " + str(e))
+
+        def ms(u, step):
+            return f"{u * step:g}"
+
+        print("\nOne value or min-max for the intervals. Enter keeps a value as it is.")
+        r = field("Connection interval (ms)", f"{ms(v['conn_min'], 1.25)}-{ms(v['conn_max'], 1.25)} ms",
+                  _range_text("interval"), lambda t: _range_steps(t, "interval"))
+        if r:
+            v["conn_min"], v["conn_max"] = r
+        r = field("Latency (connection events the badge may skip)", str(v["latency"]),
+                  _range_text("latency"), lambda t: _steps(t, "latency"))
+        if r is not None:
+            v["latency"] = r
+        need = (1 + v["latency"]) * v["conn_max"] * 2.5 / 1000  # seconds
+
+        def timeout(t):
+            u = _steps(t, "timeout")
+            if u * 4 <= (1 + v["latency"]) * v["conn_max"]:
+                raise ValueError(f"supervision timeout: has to be longer than {need:g} s "
+                                 "with this interval and latency")
+            return u
+        r = field("Supervision timeout (s)", f"{v['timeout'] / 100:g} s",
+                  _range_text("timeout") + f", and longer than {need:g} s with this interval and latency",
+                  timeout)
+        if r is not None:
+            v["timeout"] = r
+        r = field("Advertising interval (ms)", f"{ms(v['adv_min'], 0.625)}-{ms(v['adv_max'], 0.625)} ms",
+                  _range_text("adv"), lambda t: _range_steps(t, "adv"))
+        if r:
+            v["adv_min"], v["adv_max"] = r
+
+        def tx(t):
+            try:
+                d = int(t.lstrip("+"))
+            except ValueError:
+                raise ValueError(f"radio power: '{t}' is not a whole number of dBm") from None
+            if d not in TX_LEVELS:
+                raise ValueError("radio power: not one of the radio's steps")
+            return d
+        r = field("Radio power (dBm)", f"{v['tx_dbm']:+d} dBm",
+                  "one of " + " ".join(map(str, TX_LEVELS)), tx)
+        if r is not None:
+            v["tx_dbm"] = r
+        err = link_check(v)
+        if err:  # a timeout kept from before can be too short for a new interval
+            print("\nnot set: " + err)
+            return
+        cmd_link(ns(**keep, _values=v))
 
 
 def menu_flash():
@@ -1879,11 +1976,16 @@ def main():
     s.add_argument("preset", nargs="?", choices=["fast", "default", "saver"],
                    help="fast = 7.5 ms, saver = 50-100 ms (connection interval only); "
                         "default = everything back to 15-30 ms, latency 0, 4 s, 62.5-125 ms, +6 dBm")
-    s.add_argument("--interval", metavar="MS", help="connection interval, 15 or 7.5-15 (1.25 ms steps)")
-    s.add_argument("--latency", type=int, help="connection events the badge may skip, 0-499")
-    s.add_argument("--timeout", type=float, metavar="S", help="supervision timeout in seconds")
-    s.add_argument("--adv", metavar="MS", help="advertising interval, 100 or 62.5-125 (0.625 ms steps)")
-    s.add_argument("--tx", type=int, metavar="DBM", help="radio power: " + " ".join(map(str, TX_LEVELS)))
+    s.add_argument("--interval", metavar="MS", help="connection interval: one value or min-max, "
+                   + _range_text("interval") + " (e.g. 15 or 7.5-15)")
+    s.add_argument("--latency", metavar="N", help="how many connection events in a row the badge may skip: "
+                   + _range_text("latency"))
+    s.add_argument("--timeout", metavar="S", help="supervision timeout: " + _range_text("timeout")
+                   + ", longer than (1 + latency) x max interval x 2")
+    s.add_argument("--adv", metavar="MS", help="advertising interval: one value or min-max, "
+                   + _range_text("adv") + " (e.g. 100 or 62.5-125)")
+    s.add_argument("--tx", type=int, metavar="DBM", help="radio power in dBm: one of "
+                   + " ".join(map(str, TX_LEVELS)))
     s.set_defaults(f=cmd_link)
     s = sub.add_parser("text"); s.add_argument("messages", nargs="+")
     s.add_argument("--mode", default="left",

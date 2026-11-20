@@ -171,20 +171,21 @@ label.chk { display: inline-flex; gap: 4px; align-items: center; }
       <details class="linkbox" id="linkBox">
         <summary>Bluetooth link <span class="hint" id="linkHint"></span></summary>
         <div class="set"><span>Preset</span><span class="seg" id="linkPreset">
-          <button data-v="fast" title="7.5 ms: fastest streaming, most battery while connected">fast</button><button
-            data-v="default" title="15-30 ms (Windows picks 30): the default">default</button><button
-            data-v="saver" title="50-100 ms: slow streaming, least battery while connected">saver</button></span></div>
-        <div class="set"><span>Connection interval <span class="hint">ms, 7.5-4000</span></span><span class="linkrow">
+          <button data-v="fast" title="connection interval 7.5 ms: fastest streaming, the most radio time while connected">fast</button><button
+            data-v="default" title="connection interval 15-30 ms (Windows picks 30): the default">default</button><button
+            data-v="saver" title="connection interval 50-100 ms: slow streaming, less radio time while connected">saver</button></span></div>
+        <div class="set"><span>Connection interval <span class="hint">min to max, ms: 7.5 to 4000 in steps of 1.25</span></span><span class="linkrow">
           <input type="number" id="lkMin" min="7.5" max="4000" step="1.25"> &ndash;
           <input type="number" id="lkMax" min="7.5" max="4000" step="1.25"></span></div>
-        <div class="set"><span>Latency <span class="hint">events it may skip</span></span>
+        <div class="set"><span>Latency <span class="hint">connection events it may skip: 0 to 499</span></span>
           <input type="number" id="lkLat" min="0" max="499" step="1"></div>
-        <div class="set"><span>Supervision timeout <span class="hint">s</span></span>
-          <input type="number" id="lkTo" min="0.1" max="32" step="0.1"></div>
-        <div class="set"><span>Advertising <span class="hint">ms, 20-10240</span></span><span class="linkrow">
+        <div class="set"><span>Supervision timeout <span class="hint">s: 0.1 to 32 in steps of 0.01, and over
+          <span id="lkToMin">0.06</span> s with this interval and latency</span></span>
+          <input type="number" id="lkTo" min="0.1" max="32" step="0.01"></div>
+        <div class="set"><span>Advertising interval <span class="hint">min to max, ms: 20 to 10240 in steps of 0.625</span></span><span class="linkrow">
           <input type="number" id="lkAdvMin" min="20" max="10240" step="0.625"> &ndash;
           <input type="number" id="lkAdvMax" min="20" max="10240" step="0.625"></span></div>
-        <div class="set"><span>Radio power</span><select id="lkTx"></select></div>
+        <div class="set"><span>Radio power <span class="hint">dBm, the radio's steps</span></span><select id="lkTx"></select></div>
         <div class="hint" id="linkGranted" style="padding: 6px 0 2px"></div>
         <div class="row" style="justify-content: flex-end">
           <button id="btnLinkDef" data-need="link">Defaults</button>
@@ -969,7 +970,12 @@ const LINK_INPUTS = ["lkMin", "lkMax", "lkLat", "lkTo", "lkAdvMin", "lkAdvMax", 
 for (const d of TX_LEVELS) $("lkTx").add(new Option((d > 0 ? "+" : "") + d + " dBm", d));
 $("lkTx").value = LINK_DEFAULT.txDbm;
 let linkEdited = false;  // the fields hold something not applied yet: don't overwrite it
-LINK_INPUTS.forEach(id => $(id).addEventListener("input", () => { linkEdited = true; }));
+// the timeout has to be longer than (1 + latency) x max interval x 2
+function linkToMin() {
+  const mx = parseFloat($("lkMax").value), lat = parseInt($("lkLat").value, 10);
+  if (isFinite(mx) && isFinite(lat)) $("lkToMin").textContent = fmt((1 + lat) * mx * 2 / 1000);
+}
+LINK_INPUTS.forEach(id => $(id).addEventListener("input", () => { linkEdited = true; linkToMin(); }));
 const fmt = x => String(+x.toFixed(3));
 
 function showLinkFields(k) {
@@ -977,6 +983,7 @@ function showLinkFields(k) {
   $("lkLat").value = k.latency; $("lkTo").value = fmt(k.timeout / 100);
   $("lkAdvMin").value = fmt(k.advMin * 0.625); $("lkAdvMax").value = fmt(k.advMax * 0.625);
   $("lkTx").value = k.txDbm;
+  linkToMin();
 }
 function refreshLink(s) {
   const ok = !!link && custom && !!s.link;
@@ -995,14 +1002,17 @@ function refreshLink(s) {
 
 // The fields in Bluetooth units, or an error text (the firmware's ble_link_check()).
 function readLinkFields() {
-  const units = (id, step) => {
+  const units = (id, step, unit = "ms") => {
     const x = parseFloat($(id).value), u = Math.round(x / step);
-    if (!isFinite(x) || Math.abs(u * step - x) > 1e-6) throw `${$(id).value || "(empty)"} is not a multiple of ${step} ms`;
+    const name = { lkMin: "connection interval", lkMax: "connection interval", lkTo: "supervision timeout",
+                   lkAdvMin: "advertising interval", lkAdvMax: "advertising interval" }[id];
+    if (!isFinite(x)) throw `${name}: empty or not a number`;
+    if (Math.abs(u * step - x) > 1e-6) throw `${name}: ${$(id).value} is not a multiple of ${step} ${unit}`;
     return u;
   };
   try {
     const k = { connMin: units("lkMin", 1.25), connMax: units("lkMax", 1.25), latency: +$("lkLat").value,
-                timeout: Math.round(parseFloat($("lkTo").value) * 100),
+                timeout: units("lkTo", 0.01, "s"),
                 advMin: units("lkAdvMin", 0.625), advMax: units("lkAdvMax", 0.625), txDbm: +$("lkTx").value };
     if (!(6 <= k.connMin && k.connMin <= k.connMax && k.connMax <= 3200)) return "connection interval: 7.5 ms to 4 s, min not above max";
     if (!(Number.isInteger(k.latency) && k.latency >= 0 && k.latency <= 499)) return "latency: 0 to 499";
@@ -1011,7 +1021,7 @@ function readLinkFields() {
       return `timeout must be longer than (1 + latency) x max interval x 2 = ${fmt((1 + k.latency) * k.connMax * 2.5 / 1000)} s`;
     if (!(32 <= k.advMin && k.advMin <= k.advMax && k.advMax <= 16384)) return "advertising: 20 ms to 10.24 s, min not above max";
     return k;
-  } catch (e) { return "interval: " + e; }
+  } catch (e) { return e; }
 }
 
 async function applyLink(k, label) {
