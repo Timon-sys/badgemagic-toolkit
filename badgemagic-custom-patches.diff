@@ -136,7 +136,7 @@ index cf4bb79..79e0d12 100644
  	int frame = mod(bm->anim_step, frame_steps*frames)/frame_steps;
  	bm->anim_step++;
 diff --git a/src/ble/peripheral.c b/src/ble/peripheral.c
-index 7f657ae..2a4efeb 100644
+index 7f657ae..5e33d1c 100644
 --- a/src/ble/peripheral.c
 +++ b/src/ble/peripheral.c
 @@ -2,6 +2,7 @@
@@ -476,7 +476,7 @@ index 7f657ae..2a4efeb 100644
  
  		len + 1,
  		GAP_ADTYPE_LOCAL_NAME_COMPLETE,
-@@ -223,35 +410,87 @@ static int setup_scan_rsp(char *name, uint8_t len)
+@@ -223,35 +410,92 @@ static int setup_scan_rsp(char *name, uint8_t len)
  	return ret;
  }
  
@@ -506,7 +506,12 @@ index 7f657ae..2a4efeb 100644
 -	uint16_t max_interval = 500;
 +/* Hands badge_cfg's link settings to the stack. live = also to what is on
 + * the air now: ask the client for the new connection parameters, restart
-+ * advertising with the new interval, switch the radio power. */
++ * advertising with the new interval, switch the radio power.
++ * The radio power only reaches new connections this way: the library copies
++ * it into its advertising state once, when Bluetooth starts
++ * (llAdvertiseCreateCore), and a restarted advertising keeps that copy. So
++ * badgetool and the web panel save and restart the badge after a power
++ * change. */
 +static void link_apply(int live)
 +{
 +	uint16_t min_interval = badge_cfg.ble_link.conn_min;
@@ -584,7 +589,7 @@ index 7f657ae..2a4efeb 100644
  
  	GAPRole_BroadcasterSetCB(&broadcast_handlers);
  
-@@ -262,6 +501,7 @@ static void gap_init()
+@@ -262,6 +506,7 @@ static void gap_init()
  void peripheral_init()
  {
  	taskid = TMOS_ProcessEventRegister(peripheral_task);

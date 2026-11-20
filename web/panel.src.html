@@ -1029,10 +1029,18 @@ async function applyLink(k, label) {
   const payload = [CMD_MISC, MISC_LINK, ...u16(k.connMin), ...u16(k.connMax), ...u16(k.latency),
                    ...u16(k.timeout), ...u16(k.advMin), ...u16(k.advMax), k.txDbm & 0xff];
   await run(label, async l => {
+    const oldTx = status.link ? status.link.txDbm : k.txDbm;
     const r = parseLink(await l.query(payload, "LNK"));
     if (r.result !== 0) { log("the badge refused it: " + r.result); return; }
     await l.ng([CMD_SAVE]); await sleep(1000);
     linkEdited = false;
+    if (k.txDbm !== oldTx) {
+      // The radio power reaches the advertising only after a restart: the
+      // Bluetooth library keeps the value it read when Bluetooth started.
+      log(label + " saved; restarting the badge for the new radio power");
+      await rebootAndRestore(l);
+      return;
+    }
     l.linkAt = 0;  // ask again now: the client has answered the new interval by then
     log(label + " saved");
     try { status = await l.status(); } catch {}

@@ -48,8 +48,8 @@ ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
 ## What the patched firmware adds
 
 - Live streaming, the reason I started the project: the badge becomes a 44×11
-  display you can drive from a PC at about 60 fps over USB and up to about
-  40 fps over Bluetooth. Upstream had streaming over Bluetooth only. Try
+  display you can drive from a PC at about 60 fps over USB and at 40 to 60 fps
+  over Bluetooth with the fastest link setting. Upstream had streaming over Bluetooth only. Try
   `badgetool.py stream picture.png`, or push frames from your own code the way
   [`ng/badge_display.py`](ng/badge_display.py) does.
 - A display that does not flicker: about 91 Hz instead of upstream's 45 Hz,
@@ -60,7 +60,7 @@ ship with the [Badge Magic](https://github.com/fossasia/badgemagic-app) app.
 - Bluetooth timing you set yourself: since 1.7.0 the connection interval,
   latency, timeout, advertising interval and radio power are settings
   (`badgetool.py link`, or the web panel) instead of a choice between firmware
-  files. Ask for 7.5 ms and Windows streams at about 40 fps. See
+  files. Ask for 7.5 ms and Windows streams at 40 to 60 fps. See
   [The Bluetooth link](#the-bluetooth-link).
 - A USB serial port that works on Windows too, at the same speed as HID.
 - Uploads from the Badge Magic app work, with or without a PIN. Renaming the
@@ -135,7 +135,7 @@ With the patched firmware, this is the whole picture.
 | | USB HID | USB serial | Bluetooth |
 |---|---|---|---|
 | Text and image uploads | yes | yes | yes |
-| Live streaming | ~60 fps | ~60 fps | about 15 to 40 fps, depending on the [link settings](#the-bluetooth-link) ([details](#streaming-speed)) |
+| Live streaming | ~60 fps | ~60 fps | about 15 to 60 fps, depending on the [link settings](#the-bluetooth-link) ([details](#streaming-speed)) |
 | Settings (clock, brightness, name, always-on, splash, charging screen) | yes | yes | yes |
 | Bluetooth link settings (`link`) | yes (firmware 1.7.0) | yes (1.7.0) | yes (1.7.0) |
 | Full status and battery voltage | yes | yes | yes (firmware 1.5.0 and later; before that the battery percentage and firmware version only) |
@@ -189,7 +189,7 @@ python badgetool.py text "Hello" "Second slot" --mode center
 | `pin [NNNNNN\|random]` | shows the PIN and how many devices are paired, or sets a new one (which removes every pairing); USB only |
 | `forget-bonds` | removes every paired device; USB only |
 | `pair --ble` / `unpair --ble` | pairs this PC with the badge / removes the pairing (Windows) |
-| `link [fast\|default\|saver] [--interval MS] [--latency N] [--timeout S] [--adv MS] [--tx DBM]` | shows or sets the Bluetooth link; firmware 1.7.0, see [The Bluetooth link](#the-bluetooth-link) |
+| `link [fast\|default\|saver] [--interval MS] [--latency N] [--timeout S] [--adv MS] [--tx DBM]` | shows or sets the Bluetooth link; a radio power change reboots the badge; firmware 1.7.0, see [The Bluetooth link](#the-bluetooth-link) |
 | `text MSG [MSG ...]` | one message per slot; options `--mode --speed --blink --border --font thin\|app --preview` |
 | `upload config.toml` | a full Badge Magic config file (see below) |
 | `image pic.png [--invert]` | static image in slot 1; dark pixels light up, `--invert` for light ones |
@@ -424,7 +424,7 @@ same choices under Settings, Bluetooth link.
 | Latency (`--latency`) | 0 | 0 to 499 | how many connection events in a row the badge may skip when it has nothing to send |
 | Supervision timeout (`--timeout`) | 4 s | 0.1 to 32 s | how long a silent link lasts before it counts as lost; it has to be longer than (1 + latency) × the longest interval × 2 |
 | Advertising interval (`--adv`) | 62.5 to 125 ms | 20 ms to 10.24 s, in 0.625 ms steps | how often the badge announces itself while nothing is connected |
-| Radio power (`--tx`) | +6 dBm | −16, −12, −8, −5, −3, −1 and 0 to +6 dBm | lower means shorter range |
+| Radio power (`--tx`) | +6 dBm | −16, −12, −8, −5, −3, −1 and 0 to +6 dBm | lower means shorter range; a change restarts the badge |
 
 A change takes effect immediately and is saved. A connected device is asked
 for the new connection settings right away, so you can change the interval in
@@ -435,13 +435,34 @@ out of range, so nothing invalid goes on the air. If a setting leaves the badge
 hard to reach over Bluetooth, for example a low radio power, USB still works,
 and `link default` brings it back.
 
+The radio power is the exception. The Bluetooth library reads it only when
+Bluetooth starts, so `link` and the web panel restart the badge after a power
+change, the same way they do after a new name. If you set the power from your
+own code, restart the badge afterwards (`badgetool.py reset`). Until then the
+badge already reports the new value but still sends with the old one. Measured
+from a PC, the received signal got weaker with each step below 0 dBm, about
+14 dB in total down to −16 dBm. From 0 dBm up to +6 dBm it got only about 2 dB
+stronger.
+
 The badge can only ask for a connection interval; the connected device
 decides, and `link` and the web panel show what it granted. Windows 11 granted
 30 ms for the default 15 to 30 ms, 97.5 ms for 50 to 100 ms, and 7.5 ms when
-asked for exactly 7.5 ms. Other systems are untested.
+asked for exactly 7.5 ms. It granted latency 4 and 10 as asked. Other systems
+are untested.
 
 A short interval costs battery while something is connected, and a longer
 interval or some latency is meant to save it. How much is not measured yet.
+Latency slows everything the PC sends, because the badge does not listen while
+it skips events. At the default interval, streaming went from 19 fps at
+latency 0 to 10 fps at latency 4 and 5.5 fps at latency 10, and at latency 10
+most frames were never confirmed. A command and its answer took 0.3 s at
+latency 0 and up to 2.9 s at latency 10. Keep latency at 0 if you stream.
+
+A longer advertising interval makes the badge slower to find. Connecting from
+Windows took about 0.5 s at 20 ms, about 2 s at the default, about 4 s at
+250 ms and 7 to 17 s at 500 ms. At 1 s and above Windows often did not find
+the badge at all, and at exactly 1000 ms it never saw it in two 20-second
+scans, while 999.375 ms and 1000.625 ms worked.
 
 ### Streaming speed
 
@@ -450,7 +471,7 @@ response, from a Windows 11 PC, at three [connection intervals](#the-bluetooth-l
 
 | Connection interval | What Windows granted | Streaming |
 |---|---|---|
-| 7.5 ms | 7.5 ms | about 40 fps (41.7 fps in a 150-frame run) |
+| 7.5 ms | 7.5 ms | 40 to 60 fps (41.7, 59 and 62 fps in three 150-frame runs) |
 | 15 to 30 ms, the default | 30 ms | 15 to 30 fps |
 | 50 to 100 ms | 97.5 ms | about 6 fps |
 
@@ -592,7 +613,7 @@ from its Bluetooth settings and pair again.
 | File | `flash` name | LED wiring | Tested on a badge |
 |---|---|---|---|
 | `badgemagic-ch582-2key.bin` | `normal` | normal | same code as `pb6` but the LED pin; ran on a PB6 board (all but line T), upstream-wired board untested |
-| `badgemagic-ch582-2key-pb6.bin` | `pb6` | PB6 | yes: every command over USB HID, serial and Bluetooth, the link settings included (an automated test script runs them before each release, 136 checks for 1.7.0); streaming at about 40 fps with a 7.5 ms interval and 15 to 30 fps at the default; the link settings in the web panel over Bluetooth; 60 rounds of text, image and config uploads over HID and 10 reboots each followed by an upload, without a restart. As `pb6-fastble` up to 1.6.1: the phone app on two badges; pairing with the PIN from Windows, Android and the app; the web panel over all three connections; 13 to 23 fps with nearly every LED lit |
+| `badgemagic-ch582-2key-pb6.bin` | `pb6` | PB6 | yes: every command over USB HID, serial and Bluetooth, the link settings included (an automated test script runs them before each release, 136 checks for 1.7.0); streaming at 40 to 60 fps with a 7.5 ms interval and 15 to 30 fps at the default; every radio power step, measured at the PC; the link settings in the web panel over Bluetooth; 60 rounds of text, image and config uploads over HID and 10 reboots each followed by an upload, without a restart. As `pb6-fastble` up to 1.6.1: the phone app on two badges; pairing with the PIN from Windows, Android and the app; the web panel over all three connections; 13 to 23 fps with nearly every LED lit |
 
 The `normal` builds ran for weeks on my badges (an earlier version), and
 everything worked except the LEDs on line T, because both my badges are wired
@@ -755,8 +776,8 @@ storage, and the screens and buttons.
   characteristic did not allow writes without response. It now asks for its
   [link settings](#the-bluetooth-link) (15 to 30 ms by default) after
   connecting, uses MTU 96 and accepts write-without-response, which took live
-  streaming from about 4 fps to 15 to 30 fps at the default interval and about
-  40 fps at 7.5 ms. Up to 1.6.1 this was only in the `fastble` builds.
+  streaming from about 4 fps to 15 to 30 fps at the default interval and 40
+  to 60 fps at 7.5 ms. Up to 1.6.1 this was only in the `fastble` builds.
 - The scan response claimed a radio power of 9 dBm while the radio ran at 6.
   It reports the real setting now.
 - A crash under load: `ng_notify()` freed the notification buffer even after
@@ -904,7 +925,9 @@ interval and latency, advertising interval or radio power out of range;
 `0xf0` = fewer than 13 bytes), the 13 bytes as they are now set, then a 1 if
 something is connected over Bluetooth, followed by the interval, latency and
 timeout that device granted (u16 each, same units). A refused set changes
-nothing. The settings are kept with save (6).
+nothing. The settings are kept with save (6). A new radio power goes on the
+air only after a restart, power (1) with argument 2, and the reply shows the
+new value straight away.
 
 Over Bluetooth, the 64-byte replies arrive as `f056` notifications, followed
 by the 1-byte ack every `ng` command gets. With an MTU of 67 or more (the badge

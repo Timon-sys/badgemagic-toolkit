@@ -421,7 +421,7 @@ def link_check(v):
 
 def link_text(v, granted=None):
     def ms(u, step):
-        return f"{u * step:g}"
+        return f"{u * step:.3f}".rstrip("0").rstrip(".")
     lines = [f"connection     {ms(v['conn_min'], 1.25)}-{ms(v['conn_max'], 1.25)} ms requested, "
              f"latency {v['latency']}, timeout {v['timeout'] / 100:g} s",
              f"advertising    {ms(v['adv_min'], 0.625)}-{ms(v['adv_max'], 0.625)} ms",
@@ -1178,11 +1178,20 @@ def cmd_link(a):
     if err:
         b.close()
         sys.exit(err)
+    old_tx = cur["tx_dbm"]
     res, cur, granted = b.link(new)
     if res != 0:
         b.close()
         sys.exit(f"the badge refused it: {res}")
     b.save()
+    if cur["tx_dbm"] != old_tx:
+        # The Bluetooth library copies the radio power into its advertising
+        # when Bluetooth starts and keeps that copy: new power only reaches
+        # the air after a restart (new connections would take it at once).
+        print(link_text(cur))
+        print("saved; restarting the badge for the new radio power ...")
+        reboot_and_restore_time(b)
+        return
     if isinstance(b, BleBadge):
         granted = b.link()[2]  # after save()'s pause the client has answered
     b.close()
@@ -1708,7 +1717,7 @@ def menu_link():
                     print("  " + str(e))
 
         def ms(u, step):
-            return f"{u * step:g}"
+            return f"{u * step:.3f}".rstrip("0").rstrip(".")
 
         print("\nOne value or min-max for the intervals. Enter keeps a value as it is.")
         r = field("Connection interval (ms)", f"{ms(v['conn_min'], 1.25)}-{ms(v['conn_max'], 1.25)} ms",
