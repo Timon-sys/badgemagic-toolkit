@@ -15,7 +15,7 @@ Run without arguments for an interactive menu, or use a command:
   python badgetool.py pin [123456|random]       show / set the pairing PIN (USB only)
   python badgetool.py forget-bonds              remove every paired device (USB only)
   python badgetool.py pair --ble                pair this PC with a badge (Windows); unpair undoes it
-  python badgetool.py link [--interval 7.5-15 ...]  show / set the Bluetooth link (intervals, power)
+  python badgetool.py link [fast|default|saver]  show / set the Bluetooth link; --interval --adv --tx ...
   python badgetool.py text "Hi" "Second slot"   one message per slot (USB or BLE)
   python badgetool.py upload config.toml        full badgemagic config file
   python badgetool.py image pic.png [--invert]  static image into slot 1 (dark = lit)
@@ -29,8 +29,8 @@ Channel (default USB HID):
   --serial [PORT]       USB serial (COM port / ttyACM) instead of HID; without a
                         port the badge is found automatically (-i N picks one)
 Over BLE everything works except flash and the PIN settings (security, pin,
-forget-bonds: USB only); status and battery show only the battery % + device
-info (no voltage, clock or settings yet).
+forget-bonds: USB only). With firmware before 1.5.0, status and battery over
+BLE show only the battery % and the device info.
 
 Badges it knows:
   custom  CH582 with our patched FOSSASIA firmware ("FOSSASIA WAS HERE")
@@ -85,6 +85,8 @@ LINK_FIELDS = ("conn_min", "conn_max", "latency", "timeout", "adv_min", "adv_max
 LINK_DEFAULT = dict(conn_min=12, conn_max=24, latency=0, timeout=400,
                     adv_min=100, adv_max=200, tx_dbm=6)
 TX_LEVELS = (-16, -12, -8, -5, -3, -1, 0, 1, 2, 3, 4, 5, 6)  # the radio's steps in dBm
+# connection interval presets (min, max in 1.25 ms units), the same as the web panel's
+LINK_PRESETS = {"fast": (6, 6), "default": (12, 24), "saver": (40, 80)}
 LINK_REFUSED = {0xFF: "connection interval out of range", 0xFE: "latency out of range",
                 0xFD: "timeout out of range", 0xFC: "timeout too short for that interval and latency",
                 0xFB: "advertising interval out of range", 0xFA: "bad radio power",
@@ -1112,7 +1114,12 @@ def cmd_link(a):
         b.close()
         sys.exit(str(e) if "no reply" not in str(e)
                  else "this needs firmware 1.7.0 or later ('badgetool.py flash')")
-    new = dict(LINK_DEFAULT) if a.preset == "default" else dict(cur)
+    if a.preset == "default":
+        new = dict(LINK_DEFAULT)
+    else:
+        new = dict(cur)
+        if a.preset:  # fast / saver: only the connection interval
+            new["conn_min"], new["conn_max"] = LINK_PRESETS[a.preset]
     if a.interval:
         new["conn_min"], new["conn_max"] = _ms_range(a.interval, 1.25, "interval")
     if a.latency is not None:
@@ -1634,6 +1641,30 @@ def menu_image(live=False):
         cmd_image(ns(file=path, invert=invert, preview=False))
 
 
+def menu_link():
+    keep = dict(preset=None, interval=None, latency=None, timeout=None, adv=None, tx=None)
+    cmd_link(ns(**keep))  # show what is set and what the client granted
+    c = ask("\nfast (7.5 ms) / default / saver (50-100 ms) / custom, or enter to keep: ",
+            ("fast", "default", "saver", "custom", ""))
+    if c in ("fast", "default", "saver"):
+        cmd_link(ns(**{**keep, "preset": c}))
+    elif c == "custom":
+        print("enter keeps the current value")
+        new = dict(keep)
+        new["interval"] = input("connection interval ms, e.g. 15 or 7.5-15: ").strip() or None
+        new["latency"] = int(v) if (v := input("latency 0-499: ").strip()) else None
+        new["timeout"] = float(v) if (v := input("supervision timeout s, 0.1-32: ").strip()) else None
+        new["adv"] = input("advertising interval ms, e.g. 100 or 62.5-125: ").strip() or None
+        new["tx"] = int(v) if (v := input("radio power dBm (" + " ".join(map(str, TX_LEVELS)) + "): ").strip()) else None
+        cmd_link(ns(**new))
+
+
+def menu_flash():
+    v = input("build (normal / pb6) or the path to a .bin file: ").strip().strip('"')
+    if v:
+        cmd_flash(ns(firmware=v))
+
+
 def menu_pin():
     if SESSION["ble"] is not None:
         print("the PIN can only be shown or changed over USB")
@@ -1689,6 +1720,7 @@ def _menu():
         ("charging screen at boot", lambda: cmd_charging(ns(seconds=ask(
             "seconds 0-60 (0 = boot straight to the slots), or 'button' (until a button press): ",
             tuple(map(str, range(61))) + ("button",))))),
+        ("Bluetooth link (interval, power)", menu_link),
         "Bluetooth PIN (USB only)",
         ("show / set the PIN", menu_pin),
         ("PIN required on/off", lambda: cmd_security(ns(state=ask("on/off: ", on_off)))),
@@ -1699,8 +1731,7 @@ def _menu():
         "Power and firmware",
         ("reboot", lambda: cmd_reset(ns())),
         ("power off", lambda: cmd_off(ns())),
-        ("flash firmware", lambda: cmd_flash(ns(firmware=ask("build (" + " / ".join(FIRMWARE) + "): ",
-                                                            tuple(FIRMWARE))))),
+        ("flash firmware", menu_flash),
     ]
     actions = [it for it in items if not isinstance(it, str)]
     listing = menu_columns(items)
@@ -1845,8 +1876,9 @@ def main():
     sub.add_parser("pair", help="pair this PC with a badge over Bluetooth (Windows)").set_defaults(f=cmd_pair)
     sub.add_parser("unpair", help="remove this PC's pairing with a badge (Windows)").set_defaults(f=cmd_unpair)
     s = sub.add_parser("link", help="show or set the Bluetooth link (firmware 1.7.0)")
-    s.add_argument("preset", nargs="?", choices=["default"],
-                   help="default = back to 15-30 ms, latency 0, 4 s, 62.5-125 ms, +6 dBm")
+    s.add_argument("preset", nargs="?", choices=["fast", "default", "saver"],
+                   help="fast = 7.5 ms, saver = 50-100 ms (connection interval only); "
+                        "default = everything back to 15-30 ms, latency 0, 4 s, 62.5-125 ms, +6 dBm")
     s.add_argument("--interval", metavar="MS", help="connection interval, 15 or 7.5-15 (1.25 ms steps)")
     s.add_argument("--latency", type=int, help="connection events the badge may skip, 0-499")
     s.add_argument("--timeout", type=float, metavar="S", help="supervision timeout in seconds")

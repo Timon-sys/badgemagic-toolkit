@@ -189,7 +189,7 @@ python badgetool.py text "Hello" "Second slot" --mode center
 | `pin [NNNNNN\|random]` | shows the PIN and how many devices are paired, or sets a new one (which removes every pairing); USB only |
 | `forget-bonds` | removes every paired device; USB only |
 | `pair --ble` / `unpair --ble` | pairs this PC with the badge / removes the pairing (Windows) |
-| `link [--interval MS] [--latency N] [--timeout S] [--adv MS] [--tx DBM]` / `link default` | shows or sets the Bluetooth link; firmware 1.7.0, see [The Bluetooth link](#the-bluetooth-link) |
+| `link [fast\|default\|saver] [--interval MS] [--latency N] [--timeout S] [--adv MS] [--tx DBM]` | shows or sets the Bluetooth link; firmware 1.7.0, see [The Bluetooth link](#the-bluetooth-link) |
 | `text MSG [MSG ...]` | one message per slot; options `--mode --speed --blink --border --font thin\|app --preview` |
 | `upload config.toml` | a full Badge Magic config file (see below) |
 | `image pic.png [--invert]` | static image in slot 1; dark pixels light up, `--invert` for light ones |
@@ -407,11 +407,16 @@ USB or Bluetooth, and the web panel has it under Settings, Bluetooth link.
 
 ```
 python badgetool.py link                        # the settings, and what the connected device granted
-python badgetool.py link --interval 7.5         # fastest streaming
-python badgetool.py link --interval 50-100      # slower streaming, less radio time while connected
+python badgetool.py link fast                   # 7.5 ms: fastest streaming
+python badgetool.py link saver                  # 50 to 100 ms: slower streaming, less radio time while connected
+python badgetool.py link --interval 10-20       # any interval you like
 python badgetool.py link --tx 0 --adv 100-200   # less radio power, slower advertising
-python badgetool.py link default                # back to the defaults
+python badgetool.py link default                # everything back to the defaults
 ```
+
+`fast` and `saver` change only the connection interval, the same presets the
+web panel has; `default` resets all five settings. The interactive menu has the
+same choices under Settings, Bluetooth link.
 
 | Setting | Default | Range | What it does |
 |---|---|---|---|
