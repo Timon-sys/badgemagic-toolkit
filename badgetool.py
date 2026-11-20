@@ -15,12 +15,13 @@ Run without arguments for an interactive menu, or use a command:
   python badgetool.py pin [123456|random]       show / set the pairing PIN (USB only)
   python badgetool.py forget-bonds              remove every paired device (USB only)
   python badgetool.py pair --ble                pair this PC with a badge (Windows); unpair undoes it
+  python badgetool.py link [--interval 7.5-15 ...]  show / set the Bluetooth link (intervals, power)
   python badgetool.py text "Hi" "Second slot"   one message per slot (USB or BLE)
   python badgetool.py upload config.toml        full badgemagic config file
   python badgetool.py image pic.png [--invert]  static image into slot 1 (dark = lit)
   python badgetool.py stream white|off|pic.png  live picture (custom firmware)
   python badgetool.py reset | off               reboot / power off (custom firmware)
-  python badgetool.py flash pb6|normal|X.bin    flash the custom firmware (ISP mode; -fastble variants too)
+  python badgetool.py flash pb6|normal|X.bin    flash the custom firmware (ISP mode)
 
 Channel (default USB HID):
   --ble                 scan and pick a badge over Bluetooth
@@ -62,11 +63,12 @@ WCHISP = next((c for c in (os.path.join(HERE, "tools", "wchisp-win-x64", "wchisp
                            os.path.join(HERE, "tools", "wchisp")) if os.path.isfile(c)),
               None) or shutil.which("wchisp")
 # prebuilt firmware: pb6 = boards with LED line T on PB6 (dead columns and a
-# flickering row on the normal build), normal = everything else; -fastble =
-# 15-30 ms BLE interval + MTU 96 for ~20 fps streaming (more battery while connected)
+# flickering row on the normal build), normal = everything else. The separate
+# -fastble builds are gone since 1.7.0 (the link is set with 'link' now); the
+# old names still work and pick the same files.
 FIRMWARE = {v: os.path.join(HERE, "firmware", f"badgemagic-ch582-2key{s}.bin")
             for v, s in (("normal", ""), ("pb6", "-pb6"),
-                         ("normal-fastble", "-fastble"), ("pb6-fastble", "-pb6-fastble"))}
+                         ("normal-fastble", ""), ("pb6-fastble", "-pb6"))}
 
 VID, PID = 0x0416, 0x5020
 COLS, ROWS = 44, 11
@@ -77,6 +79,16 @@ CMD_SAVE, CMD_MISC = 6, 8
 MISC_SPLASH, MISC_BRIGHTNESS, MISC_TIME, MISC_BATTERY, MISC_STATUS, MISC_CHARGING = 0, 1, 2, 3, 4, 5
 MISC_SECURITY, MISC_PIN, MISC_FORGET_BONDS = 6, 7, 8  # firmware 1.4.0, USB only
 MISC_SLOT = 9  # firmware 1.5.0: show slot N / which slots are filled
+MISC_LINK = 10  # firmware 1.7.0: Bluetooth link settings
+# Bluetooth units: intervals 1.25 ms, timeout 10 ms, advertising 0.625 ms
+LINK_FIELDS = ("conn_min", "conn_max", "latency", "timeout", "adv_min", "adv_max", "tx_dbm")
+LINK_DEFAULT = dict(conn_min=12, conn_max=24, latency=0, timeout=400,
+                    adv_min=100, adv_max=200, tx_dbm=6)
+TX_LEVELS = (-16, -12, -8, -5, -3, -1, 0, 1, 2, 3, 4, 5, 6)  # the radio's steps in dBm
+LINK_REFUSED = {0xFF: "connection interval out of range", 0xFE: "latency out of range",
+                0xFD: "timeout out of range", 0xFC: "timeout too short for that interval and latency",
+                0xFB: "advertising interval out of range", 0xFA: "bad radio power",
+                0xF0: "payload too short"}
 CHARGING_UNTIL_KEY = 255  # charging screen setting: wait for a button (firmware 1.5.0)
 MODES = ["menu", "slots", "BT download", "clock", "game", "power off"]
 
@@ -338,6 +350,18 @@ class Badge:
         res = {0: 0, 0xFF: "empty", 0xFC: "busy"}.get(r[3], r[3])
         return res, [i for i in range(8) if r[4] >> i & 1]
 
+    def link(self, values=None):
+        """Bluetooth link settings (dict of LINK_FIELDS, Bluetooth units).
+        values: set all of them first (taken at once, kept after save()).
+        Returns (result, settings, granted): result 0 = ok, else the reason it
+        was refused; granted = (interval, latency, timeout) the connected
+        client agreed to, None if nothing is connected. RuntimeError on
+        firmware before 1.7.0."""
+        payload = bytes([CMD_MISC, MISC_LINK])
+        if values is not None:
+            payload += struct.pack("<6Hb", *(values[k] for k in LINK_FIELDS))
+        return parse_link(self.ng_query(payload, b"LNK"))
+
     def pin_info(self):
         """(pin, security on, paired devices), None on firmware before 1.4.0."""
         try:
@@ -365,6 +389,45 @@ class Badge:
 
     def upload_bitmap(self, img, mode="center", speed=4):
         self.upload_slots([make_slot(to_column_groups(img)[0], mode, speed)])
+
+
+def parse_link(r):
+    """The 64-byte 'LNK' reply (layout above cfg_ble_link() in ngctrl.c)."""
+    res = 0 if r[3] == 0 else LINK_REFUSED.get(r[3], f"refused ({r[3]})")
+    vals = dict(zip(LINK_FIELDS, struct.unpack_from("<6Hb", r, 4)))
+    granted = struct.unpack_from("<3H", r, 18) if r[17] else None
+    return res, vals, granted
+
+
+def link_check(v):
+    """The firmware's ble_link_check() with readable messages; None = fine."""
+    if not 6 <= v["conn_min"] <= v["conn_max"] <= 3200:
+        return "connection interval: 7.5 ms to 4 s, min not above max"
+    if not 0 <= v["latency"] <= 499:
+        return "latency: 0 to 499"
+    if not 10 <= v["timeout"] <= 3200:
+        return "timeout: 0.1 to 32 s"
+    if v["timeout"] * 4 <= (1 + v["latency"]) * v["conn_max"]:
+        need = (1 + v["latency"]) * v["conn_max"] * 2.5 / 1000
+        return f"timeout must be longer than (1 + latency) x max interval x 2 = {need:g} s"
+    if not 32 <= v["adv_min"] <= v["adv_max"] <= 16384:
+        return "advertising interval: 20 ms to 10.24 s, min not above max"
+    if v["tx_dbm"] not in TX_LEVELS:
+        return "radio power: one of " + ", ".join(map(str, TX_LEVELS)) + " dBm"
+    return None
+
+
+def link_text(v, granted=None):
+    def ms(u, step):
+        return f"{u * step:g}"
+    lines = [f"connection     {ms(v['conn_min'], 1.25)}-{ms(v['conn_max'], 1.25)} ms requested, "
+             f"latency {v['latency']}, timeout {v['timeout'] / 100:g} s",
+             f"advertising    {ms(v['adv_min'], 0.625)}-{ms(v['adv_max'], 0.625)} ms",
+             f"radio power    {v['tx_dbm']:+d} dBm"]
+    if granted:
+        lines.append(f"connected now  {ms(granted[0], 1.25)} ms, latency {granted[1]}, "
+                     f"timeout {granted[2] / 100:g} s  (what the client granted)")
+    return "\n".join(lines)
 
 
 def parse_status(r):
@@ -557,7 +620,8 @@ class BleBadge:
 
     def ng_query(self, payload, magic, timeout=3.0):
         """Firmware 1.5.0 sends the 64-byte replies as f056 notifications: one
-        on fast-ble builds, equal parts of 2+ bytes with a smaller MTU. The
+        with an MTU of 67 or more (1.7.0, and the fastble builds before it),
+        equal parts of 2+ bytes with a smaller MTU. The
         1-byte notifications are the ack ng_parse() sends after every command."""
         self.need_custom()
 
@@ -612,6 +676,7 @@ class BleBadge:
     battery = Badge.battery
     battery_info = Badge.battery_info
     show_slot = Badge.show_slot
+    link = Badge.link
 
     def pin_info(self):
         return None  # the PIN reply is USB only, by design
@@ -935,6 +1000,10 @@ battery        {s['battery_pct']} %
         s = b.status()
     pin = b.pin_info()
     temp = b.battery_info()[3]
+    try:
+        link = b.link()
+    except RuntimeError:
+        link = None  # firmware before 1.7.0
     b.close()
     if pin is None:
         sec = f"PIN {'on' if s['ble_security'] else 'off'}"
@@ -955,6 +1024,8 @@ startup anim   {'off' if s['splash_ms'] == 0 else 'on'}
 charging scr   {'(needs firmware 1.3.0)' if s['charging_screen_s'] is None else charging_text(s['charging_screen_s'])}""")
     if temp is not None:
         print(f"chip temp      {temp:.1f} C  (internal sensor, die temperature)")
+    if link is not None:
+        print(link_text(link[1], link[2]))
 
 
 def cmd_battery(a):
@@ -1010,6 +1081,66 @@ def cmd_slot(a):
         sys.exit("the badge is busy (a game, a stream or switched off); try again after that")
     else:
         sys.exit(f"the badge said {res}")
+
+
+def _ms_range(text, step, name):
+    """'7.5-15' or '15' (ms) -> (min, max) in units of step ms"""
+    try:
+        lo, _, hi = text.partition("-")
+        lo, hi = float(lo), float(hi or lo)
+    except ValueError:
+        sys.exit(f"{name}: give milliseconds like 15 or 7.5-15")
+    out = []
+    for x in (lo, hi):
+        u = round(x / step)
+        if abs(u * step - x) > 1e-6:
+            sys.exit(f"{name}: {x:g} ms is not a multiple of {step:g} ms")
+        out.append(u)
+    return tuple(out)
+
+
+def cmd_link(a):
+    """Show or set the Bluetooth link: connection interval, latency,
+    supervision timeout, advertising interval, radio power. Set values take
+    effect at once (a connected client is asked for the new interval) and are
+    saved; options left out keep their current value."""
+    b = open_one(a)
+    b.need_custom()
+    try:
+        res, cur, granted = b.link()
+    except RuntimeError as e:
+        b.close()
+        sys.exit(str(e) if "no reply" not in str(e)
+                 else "this needs firmware 1.7.0 or later ('badgetool.py flash')")
+    new = dict(LINK_DEFAULT) if a.preset == "default" else dict(cur)
+    if a.interval:
+        new["conn_min"], new["conn_max"] = _ms_range(a.interval, 1.25, "interval")
+    if a.latency is not None:
+        new["latency"] = a.latency
+    if a.timeout is not None:
+        new["timeout"] = round(a.timeout * 100)
+    if a.adv:
+        new["adv_min"], new["adv_max"] = _ms_range(a.adv, 0.625, "advertising")
+    if a.tx is not None:
+        new["tx_dbm"] = a.tx
+    if new == cur:
+        b.close()
+        print(link_text(cur, granted))
+        return
+    err = link_check(new)
+    if err:
+        b.close()
+        sys.exit(err)
+    res, cur, granted = b.link(new)
+    if res != 0:
+        b.close()
+        sys.exit(f"the badge refused it: {res}")
+    b.save()
+    if isinstance(b, BleBadge):
+        granted = b.link()[2]  # after save()'s pause the client has answered
+    b.close()
+    print(link_text(cur, granted))
+    print("saved")
 
 
 def cmd_time(a):
@@ -1713,6 +1844,15 @@ def main():
     sub.add_parser("forget-bonds", help="remove every device paired with the badge (USB only)").set_defaults(f=cmd_forget)
     sub.add_parser("pair", help="pair this PC with a badge over Bluetooth (Windows)").set_defaults(f=cmd_pair)
     sub.add_parser("unpair", help="remove this PC's pairing with a badge (Windows)").set_defaults(f=cmd_unpair)
+    s = sub.add_parser("link", help="show or set the Bluetooth link (firmware 1.7.0)")
+    s.add_argument("preset", nargs="?", choices=["default"],
+                   help="default = back to 15-30 ms, latency 0, 4 s, 62.5-125 ms, +6 dBm")
+    s.add_argument("--interval", metavar="MS", help="connection interval, 15 or 7.5-15 (1.25 ms steps)")
+    s.add_argument("--latency", type=int, help="connection events the badge may skip, 0-499")
+    s.add_argument("--timeout", type=float, metavar="S", help="supervision timeout in seconds")
+    s.add_argument("--adv", metavar="MS", help="advertising interval, 100 or 62.5-125 (0.625 ms steps)")
+    s.add_argument("--tx", type=int, metavar="DBM", help="radio power: " + " ".join(map(str, TX_LEVELS)))
+    s.set_defaults(f=cmd_link)
     s = sub.add_parser("text"); s.add_argument("messages", nargs="+")
     s.add_argument("--mode", default="left",
                    choices=["left", "right", "up", "down", "center", "fast", "drop", "curtain", "laser"])
@@ -1731,7 +1871,7 @@ def main():
     s.add_argument("--invert", action="store_true", help="light pixels light up (default: dark pixels do)"); s.set_defaults(f=cmd_stream)
     sub.add_parser("reset").set_defaults(f=cmd_reset)
     sub.add_parser("off").set_defaults(f=cmd_off)
-    s = sub.add_parser("flash"); s.add_argument("firmware", metavar="normal|pb6|normal-fastble|pb6-fastble|FILE.bin",
+    s = sub.add_parser("flash"); s.add_argument("firmware", metavar="normal|pb6|FILE.bin",
                                                 help="prebuilt variant from firmware/, or your own build")
     s.set_defaults(f=cmd_flash)
     a = p.parse_args()

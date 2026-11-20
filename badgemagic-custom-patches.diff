@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index a360b59..04d627d 100644
+index a360b59..39bb31b 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -20,7 +20,11 @@ OPT = -Os
@@ -10,7 +10,7 @@ index a360b59..04d627d 100644
 +# badgemagic-toolkit: builds are named after the toolkit release. The name has
 +# to start with the upstream tag, because the USB serial-number string takes
 +# the first characters of VERSION up to the tag's length.
-+TOOLKIT_VERSION = 1.6.1
++TOOLKIT_VERSION = 1.7.0
 +VERSION = $(VERSION_ABBR)-toolkit-$(TOOLKIT_VERSION)
  VERSION_ABBR = $(shell git describe --abbrev=0 --tags 2>/dev/null || echo "unknown")
  ifeq ($(VERSION_ABBR),unknown)
@@ -26,10 +26,10 @@ index a360b59..04d627d 100644
  CFLAGS += -DHARDWARE_REV3=$(HARDWARE_REV3)
  endif
 diff --git a/src/animation.c b/src/animation.c
-index cf4bb79..c7add0e 100644
+index cf4bb79..79e0d12 100644
 --- a/src/animation.c
 +++ b/src/animation.c
-@@ -170,6 +170,22 @@ int ani_scroll_right(bm_t *bm, uint16_t *fb)
+@@ -170,12 +170,30 @@ int ani_scroll_right(bm_t *bm, uint16_t *fb)
  	return ani_scroll_x(bm, fb, 1);
  }
  
@@ -50,9 +50,20 @@ index cf4bb79..c7add0e 100644
 +}
 +
  /* Returns horizontal centering offset for a frame.
-  * Returns 0 if content fills the full width (no centering needed). */
+- * Returns 0 if content fills the full width (no centering needed). */
++ * Returns 0 if content fills the full width (no centering needed), or if
++ * there is more than one page. Counted like page_count(): content that fits
++ * in 44 columns but arrives padded to 48 (8-column blocks) is one page, and
++ * used to be left-aligned instead of centred. */
  static int get_x_offset(bm_t *bm, int frame)
-@@ -209,7 +225,7 @@ void ani_shift_y(bm_t *bm, uint16_t *fb, int y, int frame)
+ {
+-	int frames = ALIGN(bm->width, LED_COLS) / LED_COLS;
+-	if (frames > 1)
++	if (page_count(bm) > 1)
+ 		return 0;
+ 
+ 	int frame_start = frame * LED_COLS;
+@@ -209,7 +227,7 @@ void ani_shift_y(bm_t *bm, uint16_t *fb, int y, int frame)
  void ani_scroll_y(bm_t *bm, uint16_t *fb)
  {
  	int frame_steps = LED_ROWS * 3; // in-still-out
@@ -61,7 +72,7 @@ index cf4bb79..c7add0e 100644
  	int total_steps = frame_steps * frames;
  	int frame = mod(bm->anim_step, total_steps)/frame_steps;
  
-@@ -229,7 +245,7 @@ int ani_scroll_up(bm_t *bm, uint16_t *fb)
+@@ -229,7 +247,7 @@ int ani_scroll_up(bm_t *bm, uint16_t *fb)
  	ani_scroll_y(bm, fb);
  
  	int frame_steps = LED_ROWS * 3; // in-still-out
@@ -70,7 +81,7 @@ index cf4bb79..c7add0e 100644
  	int total_steps = frame_steps * frames;
  	bm->anim_step++;
  
-@@ -241,7 +257,7 @@ int ani_scroll_down(bm_t *bm, uint16_t *fb)
+@@ -241,7 +259,7 @@ int ani_scroll_down(bm_t *bm, uint16_t *fb)
  	ani_scroll_y(bm, fb);
  
  	int frame_steps = LED_ROWS * 3; // in-still-out
@@ -79,7 +90,7 @@ index cf4bb79..c7add0e 100644
  	int total_steps = frame_steps * frames;
  	bm->anim_step--;
  
-@@ -301,7 +317,7 @@ static void laser_out(bm_t *bm, uint16_t *fb, int step, int frame, int x_offset)
+@@ -301,7 +319,7 @@ static void laser_out(bm_t *bm, uint16_t *fb, int step, int frame, int x_offset)
  int ani_laser(bm_t *bm, uint16_t *fb)
  {
  	int frame_steps = LED_COLS * 3; // in-still-out
@@ -88,7 +99,7 @@ index cf4bb79..c7add0e 100644
  	int total_steps = frame_steps * frames;
  	int frame = mod(bm->anim_step, total_steps) / frame_steps;
  	int x_offset = get_x_offset(bm, frame);
-@@ -379,7 +395,7 @@ static void snowflake_out(bm_t *bm, uint16_t *fb, int step, int frame, int x_off
+@@ -379,7 +397,7 @@ static void snowflake_out(bm_t *bm, uint16_t *fb, int step, int frame, int x_off
  int ani_snowflake(bm_t *bm, uint16_t *fb)
  {
  	int frame_steps = LED_ROWS * 6; // in-still-out, each costs 2xLED_ROWS step
@@ -97,7 +108,7 @@ index cf4bb79..c7add0e 100644
  	int total_steps = frame_steps * frames;
  	int frame = mod(bm->anim_step, total_steps) / frame_steps;
  	int x_offset = get_x_offset(bm, frame);
-@@ -400,7 +416,7 @@ int ani_snowflake(bm_t *bm, uint16_t *fb)
+@@ -400,7 +418,7 @@ int ani_snowflake(bm_t *bm, uint16_t *fb)
  int ani_animation(bm_t *bm, uint16_t *fb)
  {
  	int frame_steps = ANI_ANIMATION_STEPS;
@@ -106,7 +117,7 @@ index cf4bb79..c7add0e 100644
  	int total_steps = frame_steps * frames;
  	int frame = mod(bm->anim_step, total_steps)/frame_steps;
  
-@@ -414,7 +430,7 @@ int ani_animation(bm_t *bm, uint16_t *fb)
+@@ -414,7 +432,7 @@ int ani_animation(bm_t *bm, uint16_t *fb)
  int ani_fixed(bm_t *bm, uint16_t *fb)
  {
  	int frame_steps = ANI_FIXED_STEPS;
@@ -115,7 +126,7 @@ index cf4bb79..c7add0e 100644
  	int total_steps = frame_steps * frames;
  	int frame = mod(bm->anim_step, total_steps)/frame_steps;
  
-@@ -472,7 +488,7 @@ int ani_picture(bm_t *bm, uint16_t *fb)
+@@ -472,7 +490,7 @@ int ani_picture(bm_t *bm, uint16_t *fb)
  {
  	int last_steps = LED_COLS / 2;
  	int frame_steps = LED_COLS;
@@ -125,7 +136,7 @@ index cf4bb79..c7add0e 100644
  	int frame = mod(bm->anim_step, frame_steps*frames)/frame_steps;
  	bm->anim_step++;
 diff --git a/src/ble/peripheral.c b/src/ble/peripheral.c
-index 7f657ae..f61cf16 100644
+index 7f657ae..2a4efeb 100644
 --- a/src/ble/peripheral.c
 +++ b/src/ble/peripheral.c
 @@ -2,6 +2,7 @@
@@ -136,7 +147,43 @@ index 7f657ae..f61cf16 100644
  
  #define ADV_UUID    (0xFEE0)
  
-@@ -59,6 +60,15 @@ static void processTMOSMsg(tmos_event_hdr_t *pMsg)
+@@ -16,15 +17,18 @@ typedef struct
+ } peripheralConnItem_t;
+ 
+ #define SBP_PARAM_UPDATE_DELAY 1600 // Parameter update delay (unit of 0.625ms)
+-#define SLAVE_LATENCY       0
+ 
+-#define MIN_ADV_INTERVAL    100 // Advertising interval (units of 0.625ms)
+-#define MAX_ADV_INTERVAL    200 // Advertising interval (units of 0.625ms)
++/* Connection and advertising intervals, latency, supervision timeout and
++ * radio power come from badge_cfg.ble_link and
++ * can be changed at runtime, see ble_link_changed(). The defaults are
++ * 15-30 ms and a 4 s timeout. Upstream advertised 7.5-625 ms and never asked
++ * for anything on the live link, so Windows picked a slow interval and BLE
++ * streaming ran at ~2 fps. Its 1 s timeout, once it was actually requested,
++ * was shorter than the gaps that lit LEDs can cause (see LED_TICK in main.c)
++ * and links dropped within seconds. */
+ 
+-#define MIN_CONN_INTERVAL   20 // Connection interval (units of 1.25ms)
+-#define MAX_CONN_INTERVAL   100 // Connection interval (units of 1.25ms)
+-
+-#define CONN_TIMEOUT        100 // Supervision timeout (units of 10ms)
++#define SBP_PARAM_UPDATE_EVT 0x0001
++#define LINK_CHANGED_EVT     0x0002
+ 
+ // GAP - Advertisement data (max size = 31 bytes)
+ // keep short, save energy, save the planet
+@@ -43,6 +47,9 @@ static uint8 advertData[] = {
+ // Connection item list
+ static peripheralConnItem_t conn_list;
+ 
++/* Advertising is being switched off to restart it with a new interval */
++static uint8_t adv_restart;
++
+ static void initConn(peripheralConnItem_t *conn)
+ {
+ 	conn->connHandle = GAP_CONNHANDLE_INIT;
+@@ -59,6 +66,15 @@ static void processTMOSMsg(tmos_event_hdr_t *pMsg)
  	}
  }
  
@@ -152,7 +199,30 @@ index 7f657ae..f61cf16 100644
  static void enable_advertising(uint8_t enable)
  {
  	GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8), &enable);
-@@ -91,8 +101,8 @@ static void link_onTerminated(gapRoleEvent_t *pe)
+@@ -72,12 +88,6 @@ static void link_onEstablished(gapRoleEvent_t *pe)
+ 	if(conn_list.connHandle != GAP_CONNHANDLE_INIT) {
+ 		// Only allow 1 connection, so the new connection will be dropped:
+ 		GAPRole_TerminateLink(e->connectionHandle);
+-		GAPRole_PeripheralConnParamUpdateReq(e->connectionHandle,
+-					MIN_CONN_INTERVAL,
+-					MAX_CONN_INTERVAL,
+-					SLAVE_LATENCY,
+-					CONN_TIMEOUT,
+-					taskid);
+ 		return;
+ 	}
+ 	conn_list.connHandle = e->connectionHandle;
+@@ -85,14 +95,18 @@ static void link_onEstablished(gapRoleEvent_t *pe)
+ 	conn_list.connSlaveLatency = e->connLatency;
+ 	conn_list.connTimeout = e->connTimeout;
+ 	enable_advertising(FALSE);
++	/* Ask for the faster interval once service discovery has settled, like
++	 * WCH's peripheral sample. (Upstream sent this request to the second
++	 * link it had just dropped, never to the live one.) */
++	tmos_start_task(taskid, SBP_PARAM_UPDATE_EVT, SBP_PARAM_UPDATE_DELAY);
+ }
+ 
+ static void link_onTerminated(gapRoleEvent_t *pe)
  {
  	gapTerminateLinkEvent_t *event = (gapTerminateLinkEvent_t *)pe;
  	GAPRole_TerminateLink(pe->linkCmpl.connectionHandle);
@@ -163,7 +233,21 @@ index 7f657ae..f61cf16 100644
  
  	if(event->connectionHandle == conn_list.connHandle) {
  		conn_list.connHandle = GAP_CONNHANDLE_INIT;
-@@ -154,9 +164,32 @@ static gapRolesBroadcasterCBs_t broadcast_handlers = {
+@@ -131,8 +145,11 @@ static void gap_onStateChange(gapRole_States_t newState, gapRoleEvent_t *pEvent)
+ 	case GAPROLE_WAITING:
+ 		if(pEvent->gap.opcode == GAP_LINK_TERMINATED_EVENT) {
+ 			link_onTerminated(pEvent);
+-		} else {
+-			// refer to pEvent->gap.opcode
++		} else if (adv_restart) {
++			/* advertising has stopped: start it again with the new
++			 * interval (only switched off for that, see link_apply()) */
++			adv_restart = 0;
++			enable_advertising(adv_wanted);
+ 		}
+ 		break;
+ 
+@@ -154,13 +171,38 @@ static gapRolesBroadcasterCBs_t broadcast_handlers = {
  	NULL
  };
  
@@ -197,7 +281,35 @@ index 7f657ae..f61cf16 100644
  	NULL
  };
  
-@@ -178,15 +211,144 @@ static uint16 peripheral_task(uint8 task_id, uint16 events)
+ 
++static void link_apply(int live);
++
+ static uint16 peripheral_task(uint8 task_id, uint16 events)
+ {
+ 	if(events & SYS_EVENT_MSG) { // Handle BLE stack message
+@@ -172,21 +214,166 @@ static uint16 peripheral_task(uint8 task_id, uint16 events)
+ 		return (events ^ SYS_EVENT_MSG);
+ 	}
+ 
++	if(events & SBP_PARAM_UPDATE_EVT) {
++		if(conn_list.connHandle != GAP_CONNHANDLE_INIT)
++			GAPRole_PeripheralConnParamUpdateReq(conn_list.connHandle,
++						badge_cfg.ble_link.conn_min,
++						badge_cfg.ble_link.conn_max,
++						badge_cfg.ble_link.conn_latency,
++						badge_cfg.ble_link.conn_timeout,
++						taskid);
++		return (events ^ SBP_PARAM_UPDATE_EVT);
++	}
++
++	if(events & LINK_CHANGED_EVT) {
++		link_apply(1);
++		return (events ^ LINK_CHANGED_EVT);
++	}
++
+ 	return 0;
+ }
+ 
  void ble_enable_advertise()
  {
  	uint8 e = TRUE;
@@ -342,10 +454,121 @@ index 7f657ae..f61cf16 100644
  // len should not exceed 20 chars excluding null-terminate char. Otherwise it
  // will be trimmed off and return -1
  static int setup_scan_rsp(char *name, uint8_t len)
-@@ -242,16 +404,7 @@ static void gap_init()
- 	GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, MIN_ADV_INTERVAL);
- 	GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, MAX_ADV_INTERVAL);
+@@ -197,15 +384,15 @@ static int setup_scan_rsp(char *name, uint8_t len)
+ 		// connection interval range
+ 		0x05, // length of this section
+ 		GAP_ADTYPE_SLAVE_CONN_INTERVAL_RANGE,
+-		LO_UINT16(MIN_CONN_INTERVAL),
+-		HI_UINT16(MIN_CONN_INTERVAL),
+-		LO_UINT16(MAX_CONN_INTERVAL),
+-		HI_UINT16(MAX_CONN_INTERVAL),
++		LO_UINT16(badge_cfg.ble_link.conn_min),
++		HI_UINT16(badge_cfg.ble_link.conn_min),
++		LO_UINT16(badge_cfg.ble_link.conn_max),
++		HI_UINT16(badge_cfg.ble_link.conn_max),
  
+-		// Tx power level
++		// Tx power level (upstream claimed 9 dBm, the radio was at 6)
+ 		0x02, // length of this data
+ 		GAP_ADTYPE_POWER_LEVEL,
+-		9, // 9dBm
++		(uint8_t)badge_cfg.ble_link.tx_dbm,
+ 
+ 		len + 1,
+ 		GAP_ADTYPE_LOCAL_NAME_COMPLETE,
+@@ -223,35 +410,87 @@ static int setup_scan_rsp(char *name, uint8_t len)
+ 	return ret;
+ }
+ 
+-static void gap_init()
++static const int8_t tx_dbm[] = BLE_TX_LEVELS;
++static const uint8_t tx_code[] = {
++	LL_TX_POWEER_MINUS_16_DBM, LL_TX_POWEER_MINUS_12_DBM,
++	LL_TX_POWEER_MINUS_8_DBM, LL_TX_POWEER_MINUS_5_DBM,
++	LL_TX_POWEER_MINUS_3_DBM, LL_TX_POWEER_MINUS_1_DBM,
++	LL_TX_POWEER_0_DBM, LL_TX_POWEER_1_DBM, LL_TX_POWEER_2_DBM,
++	LL_TX_POWEER_3_DBM, LL_TX_POWEER_4_DBM, LL_TX_POWEER_5_DBM,
++	LL_TX_POWEER_6_DBM,
++};
++
++/* The LL_TX_POWEER_* code for ble_tx_dbm */
++uint8_t ble_tx_code()
+ {
+-	GAPRole_PeripheralInit();
++	int8_t d = ble_tx_round(badge_cfg.ble_link.tx_dbm);
++	for (unsigned i = 0; i < sizeof(tx_dbm); i++)
++		if (tx_dbm[i] == d)
++			return tx_code[i];
++	return LL_TX_POWEER_6_DBM;
++}
+ 
+-	uint16_t min_interval = 6;
+-	uint16_t max_interval = 500;
++/* Hands badge_cfg's link settings to the stack. live = also to what is on
++ * the air now: ask the client for the new connection parameters, restart
++ * advertising with the new interval, switch the radio power. */
++static void link_apply(int live)
++{
++	uint16_t min_interval = badge_cfg.ble_link.conn_min;
++	uint16_t max_interval = badge_cfg.ble_link.conn_max;
+ 
+-	// Set the GAP Role Parameters
+ 	setup_scan_rsp(badge_cfg.ble_devname, 20);
+-	GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData);
+ 	GAPRole_SetParameter(GAPROLE_MIN_CONN_INTERVAL, sizeof(uint16), &min_interval);
+ 	GAPRole_SetParameter(GAPROLE_MAX_CONN_INTERVAL, sizeof(uint16), &max_interval);
+-	
++	GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, badge_cfg.ble_link.adv_min);
++	GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, badge_cfg.ble_link.adv_max);
++	if (!live)
++		return;
++
++	LL_SetTxPowerLevel(ble_tx_code());
++	if (conn_list.connHandle != GAP_CONNHANDLE_INIT) {
++		tmos_set_event(taskid, SBP_PARAM_UPDATE_EVT);
++	} else {
++		uint8 on = FALSE;
++		GAPRole_GetParameter(GAPROLE_ADVERT_ENABLED, &on);
++		if (on) {
++			adv_restart = 1;
++			enable_advertising(FALSE);
++		}
++	}
++}
++
++/* After badge_cfg's link settings changed (from USB or BLE: the work
++ * happens in the BLE task, see the USB note further down). */
++void ble_link_changed()
++{
++	tmos_set_event(taskid, LINK_CHANGED_EVT);
++}
++
++/* What the client granted: interval (1.25 ms), latency, timeout (10 ms).
++ * Returns 0 if nothing is connected. */
++int ble_link_info(uint16_t *interval, uint16_t *latency, uint16_t *timeout)
++{
++	if (conn_list.connHandle == GAP_CONNHANDLE_INIT)
++		return 0;
++	*interval = conn_list.connInterval;
++	*latency = conn_list.connSlaveLatency;
++	*timeout = conn_list.connTimeout;
++	return 1;
++}
++
++static void gap_init()
++{
++	GAPRole_PeripheralInit();
++
++	// Set the GAP Role Parameters
++	GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData);
++	link_apply(0);
++
+ 	// Set the GAP Characteristics
+ 	GGS_SetParameter(GGS_DEVICE_NAME_ATT, 20,
+ 				badge_cfg.ble_devname);
+-	GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, MIN_ADV_INTERVAL);
+-	GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, MAX_ADV_INTERVAL);
+-
 -	static uint32 passkey = 0; // passkey "000000"
 -	static uint8  pairMode = GAPBOND_PAIRING_MODE_NO_PAIRING;
 -	static uint8  mitm = FALSE;
@@ -356,11 +579,12 @@ index 7f657ae..f61cf16 100644
 -	GAPBondMgr_SetParameter(GAPBOND_PERI_MITM_PROTECTION, sizeof(uint8), &mitm);
 -	GAPBondMgr_SetParameter(GAPBOND_PERI_IO_CAPABILITIES, sizeof(uint8), &ioCap);
 -	GAPBondMgr_SetParameter(GAPBOND_PERI_BONDING_ENABLED, sizeof(uint8), &bonding);
++
 +	ble_apply_security();
  
  	GAPRole_BroadcasterSetCB(&broadcast_handlers);
  
-@@ -262,6 +415,7 @@ static void gap_init()
+@@ -262,6 +501,7 @@ static void gap_init()
  void peripheral_init()
  {
  	taskid = TMOS_ProcessEventRegister(peripheral_task);
@@ -418,7 +642,7 @@ index 2c127a8..ab0b6ad 100644
  	uint16_t uuid = BUILD_UINT16(pAttr->type.uuid[0], pAttr->type.uuid[1]);
  	if(uuid == RxCharUUID) {
 diff --git a/src/ble/profile/ng.c b/src/ble/profile/ng.c
-index 7ab96ce..74b8ae3 100644
+index 7ab96ce..178fbb0 100644
 --- a/src/ble/profile/ng.c
 +++ b/src/ble/profile/ng.c
 @@ -5,6 +5,7 @@
@@ -429,7 +653,17 @@ index 7ab96ce..74b8ae3 100644
  
  static const uint16_t ServiceUUID = 0xF055;
  static const gattAttrType_t service = {2, (uint8_t *)&ServiceUUID};
-@@ -41,6 +42,9 @@ static bStatus_t write_handler(uint16 connHandle, gattAttribute_t *pAttr,
+@@ -15,7 +16,8 @@ static uint8_t TxCharVal[256];
+ static uint16_t TxLen;
+ 
+ static const uint16_t RxCharUUID = 0xF057;
+-static uint8_t RxCharProps = GATT_PROP_WRITE;
++/* write-without-response lets a host stream frames back to back */
++static uint8_t RxCharProps = GATT_PROP_WRITE | GATT_PROP_WRITE_NO_RSP;
+ #define RxCharVal TxCharVal
+ static gattCharCfg_t TxCCCD[1];
+ 
+@@ -41,6 +43,9 @@ static bStatus_t write_handler(uint16 connHandle, gattAttribute_t *pAttr,
  	if (!gattPermitWrite(pAttr->permissions)) {
  		return ATT_ERR_WRITE_NOT_PERMITTED;
  	}
@@ -439,7 +673,7 @@ index 7ab96ce..74b8ae3 100644
  	
  	uint16_t uuid = BUILD_UINT16(pAttr->type.uuid[0], pAttr->type.uuid[1]);
  	if(uuid == GATT_CLIENT_CHAR_CFG_UUID) {
-@@ -51,7 +55,7 @@ static bStatus_t write_handler(uint16 connHandle, gattAttribute_t *pAttr,
+@@ -51,7 +56,7 @@ static bStatus_t write_handler(uint16 connHandle, gattAttribute_t *pAttr,
  	}
  
  	if (uuid == RxCharUUID) {
@@ -448,7 +682,7 @@ index 7ab96ce..74b8ae3 100644
  	}
  
  	return ATT_ERR_ATTR_NOT_FOUND;
-@@ -64,6 +68,9 @@ static bStatus_t read_handler(uint16_t connHandle, gattAttribute_t *pAttr,
+@@ -64,6 +69,9 @@ static bStatus_t read_handler(uint16_t connHandle, gattAttribute_t *pAttr,
  	if (!gattPermitRead(pAttr->permissions)) {
  		return ATT_ERR_READ_NOT_PERMITTED;
  	}
@@ -458,7 +692,7 @@ index 7ab96ce..74b8ae3 100644
  
  	uint16_t uuid = BUILD_UINT16(pAttr->type.uuid[0], pAttr->type.uuid[1]);
  	if(uuid == GATT_CLIENT_CHAR_CFG_UUID) {
-@@ -132,7 +139,9 @@ bStatus_t ng_notify(uint8_t *val, uint8_t len)
+@@ -132,7 +140,9 @@ bStatus_t ng_notify(uint8_t *val, uint8_t len)
  		PRINT("ble: ng_notify() notify is not enabled\n");
  		return bleIncorrectMode;
  	}
@@ -469,7 +703,7 @@ index 7ab96ce..74b8ae3 100644
  		return bleInvalidRange;
  	}
  
-@@ -149,8 +158,12 @@ bStatus_t ng_notify(uint8_t *val, uint8_t len)
+@@ -149,8 +159,12 @@ bStatus_t ng_notify(uint8_t *val, uint8_t len)
  	tmos_memcpy(noti.pValue, val, len);
  
  	bStatus_t ret = GATT_Notification(TxCCCD->connHandle, &noti, FALSE);
@@ -483,7 +717,7 @@ index 7ab96ce..74b8ae3 100644
  		PRINT("ble: noti sending failed\n");
  		return ret;
  	}
-@@ -158,3 +171,20 @@ bStatus_t ng_notify(uint8_t *val, uint8_t len)
+@@ -158,3 +172,20 @@ bStatus_t ng_notify(uint8_t *val, uint8_t len)
  	PRINT("ble: noti sent\n");
  	return SUCCESS;
  }
@@ -505,10 +739,10 @@ index 7ab96ce..74b8ae3 100644
 +	}
 +}
 diff --git a/src/ble/setup.c b/src/ble/setup.c
-index 5687d5b..d733e50 100644
+index 5687d5b..fb18c3a 100644
 --- a/src/ble/setup.c
 +++ b/src/ble/setup.c
-@@ -2,11 +2,15 @@
+@@ -2,25 +2,26 @@
  #include <stdlib.h>
  
  #include "setup.h"
@@ -518,14 +752,32 @@ index 5687d5b..d733e50 100644
  
  #ifndef BLE_BUFF_LEN
 -// MTU = 64 but clients should request new MTU, otherwise default will be 23
-+// MTU = 64 but clients should request new MTU, otherwise default will be 23.
-+// Do not raise this without also growing BLE_MEMHEAP_SIZE: buffer memory is
-+// BLE_BUFF_NUM * BLE_BUFF_LEN (22 * 68 here) out of a 6 KiB heap, and going
-+// to 128 starved it and stopped connections from establishing.
- #define BLE_BUFF_LEN (64 + 4)
+-#define BLE_BUFF_LEN (64 + 4)
++// MTU = 96 but clients should request new MTU, otherwise default will be 23.
++// 96 so a whole ng stream frame (1 + 88 bytes) fits in one write instead of
++// a 3-round-trip long write. Do not raise this without also growing
++// BLE_MEMHEAP_SIZE: buffer memory is BLE_BUFF_NUM * BLE_BUFF_LEN (22 * 100
++// here), and 128 with the old 6 KiB heap starved it and stopped connections
++// from establishing.
++#define BLE_BUFF_LEN (96 + 4)
  #endif
  
-@@ -37,9 +41,45 @@
+ #ifndef BLE_TX_NUM_EVENT
+ #define BLE_TX_NUM_EVENT                    1
+ #endif
+ 
+-#ifndef BLE_TX_POWER
+-#define BLE_TX_POWER                        LL_TX_POWEER_6_DBM
+-// #define BLE_TX_POWER                        LL_TX_POWEER_MINUS_16_DBM
+-#endif
+-
+ #ifndef BLE_MEMHEAP_SIZE
+-#define BLE_MEMHEAP_SIZE                    (1024 * 6)
++#define BLE_MEMHEAP_SIZE                    (1024 * 7)
+ #endif
+ 
+ #ifndef CENTRAL_MAX_CONNECTION
+@@ -37,9 +38,46 @@
  #define PERIPHERAL_MAX_CONNECTION           1
  #endif
  
@@ -538,8 +790,9 @@ index 5687d5b..d733e50 100644
 +#define BLE_SNV_BLOCK                       (EEPROM_PAGE_SIZE)
 +#define BLE_SNV_ADDR                        (0x7C00 - BLE_SNV_BLOCK * BLE_SNV_NUM)
 +
-+/* LE Secure Connections needs BufMaxLen > 69 (see bleConfig_t), so the
-+ * builds with the 68-byte buffer fall back to legacy passkey pairing. */
++/* LE Secure Connections needs BufMaxLen > 69 (see bleConfig_t). Every build
++ * has the 100-byte buffer since 1.7.0; before that, the builds without
++ * fast BLE had 68 bytes and fell back to legacy passkey pairing. */
 +const uint8_t ble_sc_ok = BLE_BUFF_LEN > 69;
 +
  static __attribute__((aligned(4), section(".noinit")))
@@ -571,7 +824,7 @@ index 5687d5b..d733e50 100644
  static void lsi_calib(void)
  {
  	Calibration_LSI(Level_128);
-@@ -54,7 +94,14 @@ void tmos_clockInit(void)
+@@ -54,7 +92,14 @@ void tmos_clockInit(void)
  	sys_safe_access_disable();
  	lsi_calib();
  
@@ -587,7 +840,15 @@ index 5687d5b..d733e50 100644
  	TMOS_TimerInit(0);
  }
  
-@@ -75,6 +122,12 @@ void ble_hardwareInit(void)
+@@ -68,13 +113,19 @@ void ble_hardwareInit(void)
+ 	cfg.BufMaxLen = (uint32_t)BLE_BUFF_LEN;
+ 	cfg.BufNumber = (uint32_t)BLE_BUFF_NUM;
+ 	cfg.TxNumEvent = (uint32_t)BLE_TX_NUM_EVENT;
+-	cfg.TxPower = (uint32_t)BLE_TX_POWER;
++	cfg.TxPower = (uint32_t)ble_tx_code();	/* badge_cfg.ble_link.tx_dbm */
+ 	cfg.ConnectNumber = (PERIPHERAL_MAX_CONNECTION & 3) | (CENTRAL_MAX_CONNECTION << 2);
+ 
+ 	cfg.SelRTCClock = (1 << 7) | 0x02;
  
  	cfg.rcCB = lsi_calib;
  
@@ -601,7 +862,7 @@ index 5687d5b..d733e50 100644
  	GetMACAddress(m);
  	memcpy(cfg.MacAddr, m, 6);
 diff --git a/src/ble/setup.h b/src/ble/setup.h
-index b814b36..0f87448 100644
+index b814b36..bc5e7b2 100644
 --- a/src/ble/setup.h
 +++ b/src/ble/setup.h
 @@ -1,6 +1,8 @@
@@ -613,7 +874,7 @@ index b814b36..0f87448 100644
  void tmos_clockInit(void);
  void ble_hardwareInit(void);
  void peripheral_init(void);
-@@ -8,4 +10,17 @@ void peripheral_init(void);
+@@ -8,4 +10,22 @@ void peripheral_init(void);
  void ble_enable_advertise();
  void ble_disable_advertise();
  
@@ -626,6 +887,11 @@ index b814b36..0f87448 100644
 +void ble_security_bypass_end();
 +void ble_forget_bonds();
 +uint8_t ble_bond_count();
++
++/* Link settings (badge_cfg.ble_conn_*, ble_adv_*, ble_tx_dbm) */
++uint8_t ble_tx_code();
++void ble_link_changed();
++int ble_link_info(uint16_t *interval, uint16_t *latency, uint16_t *timeout);
 +
 +/* in main.c: redraws BT-PAIRING after the PIN or security changed */
 +void bt_pairing_refresh();
@@ -648,7 +914,7 @@ index c3f5030..55d9992 100644
  }
  
 diff --git a/src/config.c b/src/config.c
-index 82b0650..2a66595 100644
+index 82b0650..fa9c476 100644
 --- a/src/config.c
 +++ b/src/config.c
 @@ -3,6 +3,7 @@
@@ -659,8 +925,11 @@ index 82b0650..2a66595 100644
  #include "resource.h"
  #include "res/foss-asia-2.xbm"
  #include "debug.h"
-@@ -12,14 +13,34 @@
+@@ -10,16 +11,37 @@
+ 
+ #include "ISP583.h"
  #include <stdlib.h>
++#include <stddef.h>
  
  #define CFG_SIZE sizeof(badge_cfg_t)
 -#define CFG_DEF_FLASH_OFFS (EEPROM_MAX_SIZE - CFG_SIZE - 1) // Default offset
@@ -696,7 +965,7 @@ index 82b0650..2a66595 100644
  	memcpy(badge_cfg.ble_devname, "LED Badge Magic\0\0\0\0", 20);
  	/* OEM app testing: */
  	// memcpy(badge_cfg.ble_devname, "LSLED\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 20);
-@@ -27,7 +48,7 @@ void cfg_fallback()
+@@ -27,7 +49,7 @@ void cfg_fallback()
  	badge_cfg.led_brightness = 0;
  	badge_cfg.led_scan_freq = 2000;
  
@@ -705,12 +974,60 @@ index 82b0650..2a66595 100644
  
  	int splash_size = ALIGN_1BYTE(splash.w) * splash.h;
  	memcpy(badge_cfg.splash_bm_bits, splash.bits, splash_size);
-@@ -37,11 +58,13 @@ void cfg_fallback()
+@@ -37,11 +59,61 @@ void cfg_fallback()
  
  	badge_cfg.reset_rx = FALSE;
  	badge_cfg.ble_security = 0;  // insecure by default
 +	badge_cfg.charging_screen_s = 5;
 +	badge_cfg.ble_passkey = BLE_PASSKEY_DEFAULT;
++	cfg_ble_link_defaults(&badge_cfg.ble_link);
++}
++
++void cfg_ble_link_defaults(ble_link_t *l)
++{
++	l->conn_min = BLE_CONN_MIN_DEFAULT;
++	l->conn_max = BLE_CONN_MAX_DEFAULT;
++	l->conn_latency = BLE_CONN_LATENCY_DEFAULT;
++	l->conn_timeout = BLE_CONN_TIMEOUT_DEFAULT;
++	l->adv_min = BLE_ADV_MIN_DEFAULT;
++	l->adv_max = BLE_ADV_MAX_DEFAULT;
++	l->tx_dbm = BLE_TX_DBM_DEFAULT;
++}
++
++/* The highest power step at or below dbm (the lowest step if dbm is below
++ * all of them). */
++int8_t ble_tx_round(int dbm)
++{
++	static const int8_t lv[] = BLE_TX_LEVELS;
++	int8_t r = lv[0];
++	for (unsigned i = 0; i < sizeof(lv); i++)
++		if (lv[i] <= dbm)
++			r = lv[i];
++	return r;
++}
++
++/* The limits from the Bluetooth Core spec (Vol 6, Part B, 4.5.1 and 4.5.2).
++ * A client may refuse values that are allowed here, but nothing outside
++ * them can get on the air. Returns 0 if the link settings are usable. */
++int ble_link_check(const ble_link_t *c)
++{
++	if (c->conn_min < 6 || c->conn_max > 3200
++	    || c->conn_min > c->conn_max)
++		return -1;
++	if (c->conn_latency > 499)
++		return -2;
++	if (c->conn_timeout < 10 || c->conn_timeout > 3200)
++		return -3;
++	/* timeout > (1 + latency) * max interval * 2, in 10 ms vs 1.25 ms units */
++	if ((uint32_t)c->conn_timeout * 4
++	    <= (1 + (uint32_t)c->conn_latency) * c->conn_max)
++		return -4;
++	if (c->adv_min < 32 || c->adv_max > 16384
++	    || c->adv_min > c->adv_max)
++		return -5;
++	if (c->tx_dbm != ble_tx_round(c->tx_dbm))
++		return -6;
++	return 0;
  }
  
  void cfg_update_crc(badge_cfg_t *cfg)
@@ -720,7 +1037,7 @@ index 82b0650..2a66595 100644
  	PRINT(__func__);
  	PRINT(": crc: %02X\n", cfg->crc);
  }
-@@ -51,17 +74,24 @@ int cfg_writeflash(uint16_t flash_offs, badge_cfg_t *cfg)
+@@ -51,17 +123,24 @@ int cfg_writeflash(uint16_t flash_offs, badge_cfg_t *cfg)
  	if (flash_offs + CFG_SIZE > EEPROM_MAX_SIZE) {
  		return -1;
  	}
@@ -749,7 +1066,7 @@ index 82b0650..2a66595 100644
  }
  
  int cfg_readflash_def(badge_cfg_t *cfg)
-@@ -74,10 +104,37 @@ int cfg_writeflash_def(badge_cfg_t *cfg)
+@@ -74,10 +153,46 @@ int cfg_writeflash_def(badge_cfg_t *cfg)
  	return cfg_writeflash(CFG_DEF_FLASH_OFFS, cfg);
  }
  
@@ -757,8 +1074,12 @@ index 82b0650..2a66595 100644
 + * so an old config is a prefix of the new one with its CRC where the first
 + * new field is now. Take them over instead of falling back to defaults,
 + * which would lose the name and every setting. */
-+#define CFG_SIZE_NO_PASSKEY  (CFG_SIZE - 4)	/* firmware 1.3.0 */
-+#define CFG_SIZE_NO_CHARGING (CFG_SIZE - 5)	/* before 1.3.0 */
++#define CFG_OLD_SIZE(first_missing) (offsetof(badge_cfg_t, first_missing) + 1)
++static const uint16_t cfg_old_sizes[] = {
++	CFG_OLD_SIZE(ble_link),           /* 1.4.0 - 1.6.x */
++	CFG_OLD_SIZE(ble_passkey),        /* 1.3.0 */
++	CFG_OLD_SIZE(charging_screen_s),  /* before 1.3.0 */
++};
 +
 +static int cfg_read_old(badge_cfg_t *cfg, int size)
 +{
@@ -767,10 +1088,14 @@ index 82b0650..2a66595 100644
 +		return ret;
 +	if (cfg_crc((uint8_t *)cfg_buf, size))
 +		return -1;
-+	memcpy(cfg, cfg_buf, size - 1);	/* without its CRC */
-+	if (size <= CFG_SIZE_NO_CHARGING)
++	int have = size - 1;	/* without its CRC */
++	memcpy(cfg, cfg_buf, have);
++	if (have <= offsetof(badge_cfg_t, charging_screen_s))
 +		cfg->charging_screen_s = 5;
-+	cfg->ble_passkey = BLE_PASSKEY_DEFAULT;
++	if (have <= offsetof(badge_cfg_t, ble_passkey))
++		cfg->ble_passkey = BLE_PASSKEY_DEFAULT;
++	if (have <= offsetof(badge_cfg_t, ble_link))
++		cfg_ble_link_defaults(&cfg->ble_link);
 +	return 0;
 +}
 +
@@ -778,16 +1103,17 @@ index 82b0650..2a66595 100644
  {
  	badge_cfg_t cfg;
  	int r = cfg_readflash_def(&cfg);
-+	if (r && cfg_read_old(&cfg, CFG_SIZE_NO_PASSKEY) == 0)
-+		r = 0;
-+	if (r && cfg_read_old(&cfg, CFG_SIZE_NO_CHARGING) == 0)
-+		r = 0;
++	for (unsigned i = 0; r && i < sizeof(cfg_old_sizes) / sizeof(cfg_old_sizes[0]); i++)
++		if (cfg_read_old(&cfg, cfg_old_sizes[i]) == 0)
++			r = 0;
 +	if (cfg.ble_passkey > BLE_PASSKEY_MAX)
 +		cfg.ble_passkey = BLE_PASSKEY_DEFAULT;
++	if (ble_link_check(&cfg.ble_link))
++		cfg_ble_link_defaults(&cfg.ble_link);
  	if (r) {
  		cfg_fallback();
  		PRINT("configuration falling back: %02x\n", r);
-@@ -85,4 +142,4 @@ void cfg_init()
+@@ -85,4 +200,4 @@ void cfg_init()
  		memcpy(&badge_cfg, &cfg, CFG_SIZE);
  		PRINT("configuration read from flash successfully\n");
  	}
@@ -795,20 +1121,31 @@ index 82b0650..2a66595 100644
 \ No newline at end of file
 +}
 diff --git a/src/config.h b/src/config.h
-index 768fbe5..0973033 100644
+index 768fbe5..5dc77c5 100644
 --- a/src/config.h
 +++ b/src/config.h
-@@ -12,6 +12,9 @@
+@@ -12,6 +12,20 @@
  #define SPLASH_MAX_HEIGHT (44) // pixels
  #define SPLASH_MAX_SIZE (ALIGN_1BYTE(SPLASH_MAX_WIDTH) * SPLASH_MAX_HEIGHT)
  
 +#define BLE_PASSKEY_DEFAULT (123456)
 +#define BLE_PASSKEY_MAX     (999999)
 +
++/* Bluetooth link settings, in Bluetooth units, checked by ble_link_check() */
++typedef struct {
++	uint16_t conn_min;     // connection interval, 1.25 ms units
++	uint16_t conn_max;
++	uint16_t conn_latency; // connection events the badge may skip
++	uint16_t conn_timeout; // supervision timeout, 10 ms units
++	uint16_t adv_min;      // advertising interval, 0.625 ms units
++	uint16_t adv_max;
++	int8_t tx_dbm;         // radio power, one of BLE_TX_LEVELS
++} __attribute__((packed)) ble_link_t;
++
  typedef struct {
  	// Turn on Bluetooth while in Normal mode and disable Downloads mode
  	uint8_t ble_always_on;
-@@ -28,7 +31,9 @@ typedef struct {
+@@ -28,13 +42,33 @@ typedef struct {
  	// Speed in period of micro second. The lower value, the higher speed
  	uint16_t splash_speedT;
  	uint8_t reset_rx; // Reset after bitmap received
@@ -816,9 +1153,33 @@ index 768fbe5..0973033 100644
 +	uint8_t ble_security;  // 1 = BLE clients must pair with ble_passkey, 0 = open
 +	uint8_t charging_screen_s; // boot charging screen in seconds, 0 = skip it
 +	uint32_t ble_passkey;  // 6-digit BLE pairing PIN, 0..999999
++
++	ble_link_t ble_link;   // 1.7.0, set with misc command 10
  
  	uint8_t crc;
  } __attribute__((packed)) badge_cfg_t;
+ 
++/* 15-30 ms, no latency, 4 s timeout: what the fastble builds used */
++#define BLE_CONN_MIN_DEFAULT     (12)
++#define BLE_CONN_MAX_DEFAULT     (24)
++#define BLE_CONN_LATENCY_DEFAULT (0)
++#define BLE_CONN_TIMEOUT_DEFAULT (400)
++#define BLE_ADV_MIN_DEFAULT      (100)  // 62.5 ms
++#define BLE_ADV_MAX_DEFAULT      (200)  // 125 ms
++#define BLE_TX_DBM_DEFAULT       (6)
++
++/* The radio's power steps in dBm, see LL_TX_POWEER_* */
++#define BLE_TX_LEVELS { -16, -12, -8, -5, -3, -1, 0, 1, 2, 3, 4, 5, 6 }
++
+ extern badge_cfg_t badge_cfg;
+ 
++void cfg_ble_link_defaults(ble_link_t *l);
++int ble_link_check(const ble_link_t *l);
++int8_t ble_tx_round(int dbm);
++
+ void cfg_init();
+ int cfg_writeflash(uint16_t flash_offs, badge_cfg_t *cfg);
+ int cfg_readflash(uint16_t flash_offs, badge_cfg_t *cfg);
 diff --git a/src/data.c b/src/data.c
 index aa3e93f..bd367f5 100644
 --- a/src/data.c
@@ -960,7 +1321,7 @@ index 2e03c8d..193fb24 100644
  void led_write2row_raw(int row, int which_half, uint32_t val);
  
 diff --git a/src/legacyctrl.c b/src/legacyctrl.c
-index bc0a725..b705d95 100644
+index bc0a725..bb94eca 100644
 --- a/src/legacyctrl.c
 +++ b/src/legacyctrl.c
 @@ -6,20 +6,6 @@
@@ -1039,7 +1400,19 @@ index bc0a725..b705d95 100644
  	{
  		char buf[48];
  		int blen = snprintf(buf, sizeof(buf), "BLE: rx packet c=%d len=%d\n", c, len);
-@@ -143,9 +98,17 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
+@@ -118,7 +73,10 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
+ 		char buf[48];
+ 		int blen = snprintf(buf, sizeof(buf), "BLE: data_len=%d\n", data_len);
+ 		cdc_tx_poll((uint8_t *)buf, blen, 10);
+-		data = realloc(data, data_len);
++		/* Writes are 16 bytes, so the last one runs up to 15 bytes past
++		 * data_len (padding): size the buffer for whole writes. */
++		data = realloc(data, (data_len + LEGACY_TRANSFER_WIDTH - 1)
++		                     / LEGACY_TRANSFER_WIDTH * LEGACY_TRANSFER_WIDTH);
+ 		if (!data) {
+ 			char buf2[32];
+ 			int blen2 = snprintf(buf2, sizeof(buf2), "BLE: realloc failed\n");
+@@ -143,9 +101,17 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
  	return 0;
  }
  
@@ -1054,11 +1427,55 @@ index bc0a725..b705d95 100644
  int legacy_usb_rx(uint8_t *buf, uint16_t len)
  {
 -	static uint16_t rx_len, data_len;
-+	static uint16_t data_len;
++	static uint16_t data_len, cap;
  	static uint8_t *data;
  
  	PRINT("dump first 8 bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-@@ -174,12 +137,10 @@ int legacy_usb_rx(uint8_t *buf, uint16_t len)
+@@ -156,30 +122,45 @@ int legacy_usb_rx(uint8_t *buf, uint16_t len)
+ 		if (memcmp(buf, "wang", 5))
+ 			return -1;
+ 
+-		int init_len = len > LEGACY_HEADER_SIZE ? len : sizeof(data_legacy_t);
+-		init_len += MAX_PACKET_SIZE;
+-		data = malloc(init_len);
++		cap = (len > LEGACY_HEADER_SIZE ? len : sizeof(data_legacy_t))
++		      + MAX_PACKET_SIZE;
++		data = malloc(cap);
++		if (!data)
++			return -1;
+ 	}
+ 
+-	memcpy(data + rx_len, buf, len);
+-	rx_len += len;
++	/* HID reports are always 64 bytes, so the last one carries padding
++	 * past the end of the transfer. Upstream copied it anyway and wrote up
++	 * to 63 bytes past the buffer, which corrupted the heap and now and
++	 * then crashed the badge after a USB upload. Drop what doesn't fit. */
++	uint16_t n = len < cap - rx_len ? len : cap - rx_len;
++	memcpy(data + rx_len, buf, n);
++	rx_len += n;
+ 
+-	if (!data_len) {
++	if (!data_len && rx_len >= LEGACY_HEADER_SIZE) {
+ 		data_legacy_t *d = (data_legacy_t *)data;
+-		uint16_t n = bigendian16_sum(d->sizes, 8);
+-		data_len = LEGACY_HEADER_SIZE + LED_ROWS * n;
+-		data = realloc(data, data_len);
++		uint16_t cols = bigendian16_sum(d->sizes, 8);
++		data_len = LEGACY_HEADER_SIZE + LED_ROWS * cols;
++		if (data_len > cap) {
++			uint8_t *bigger = realloc(data, data_len);
++			if (!bigger) {
++				free(data);
++				data = NULL;
++				rx_len = data_len = 0;
++				return -1;
++			}
++			data = bigger;
++			cap = data_len;
++		}
+ 	}
+ 
  	if ((rx_len > LEGACY_HEADER_SIZE) && rx_len >= data_len) {
  		data_flatSave(data, data_len);
  		free(data);
@@ -1920,7 +2337,7 @@ index 7b4b3c6..6a6e8d1 100644
 +}
 \ No newline at end of file
 diff --git a/src/ngctrl.c b/src/ngctrl.c
-index b5a687e..043e4d4 100644
+index b5a687e..f41a6fc 100644
 --- a/src/ngctrl.c
 +++ b/src/ngctrl.c
 @@ -4,10 +4,21 @@
@@ -1945,7 +2362,7 @@ index b5a687e..043e4d4 100644
  
  // TODO: Some of configs can be added, just listing:
  // - Remote brighness adjusting
-@@ -130,7 +141,13 @@ uint8_t load_fallback_cfg(uint8_t *val, uint16_t len)
+@@ -130,7 +141,14 @@ uint8_t load_fallback_cfg(uint8_t *val, uint16_t len)
  {
  	PRINT(__func__);
  	PRINT("\n");
@@ -1956,10 +2373,11 @@ index b5a687e..043e4d4 100644
 +		badge_cfg.ble_security = sec;
 +		badge_cfg.ble_passkey = key;
 +	}
++	ble_link_changed();
  	return 0;
  }
  
-@@ -140,7 +157,9 @@ static uint8_t cfg_splash_speed(uint8_t *val, uint16_t len)
+@@ -140,7 +158,9 @@ static uint8_t cfg_splash_speed(uint8_t *val, uint16_t len)
  	PRINT("\n");
  
  	if (len < 2) return -2;
@@ -1970,7 +2388,7 @@ index b5a687e..043e4d4 100644
  	if (ms < SPLASH_MIN_SPEED_T)
  		return -1;
  
-@@ -148,6 +167,15 @@ static uint8_t cfg_splash_speed(uint8_t *val, uint16_t len)
+@@ -148,6 +168,15 @@ static uint8_t cfg_splash_speed(uint8_t *val, uint16_t len)
  	return 0;
  }
  
@@ -1986,7 +2404,7 @@ index b5a687e..043e4d4 100644
  static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
  {
  	PRINT(__func__);
-@@ -161,6 +189,134 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
+@@ -161,6 +190,184 @@ static uint8_t cfg_led_brightness(uint8_t *val, uint16_t len)
  	return 0;
  }
  
@@ -2118,10 +2536,60 @@ index b5a687e..043e4d4 100644
 +	return ret;
 +}
 +
++/* Bluetooth link settings, in Bluetooth units (little endian):
++ *   conn_min u16, conn_max u16 (1.25 ms), latency u16, timeout u16 (10 ms),
++ *   adv_min u16, adv_max u16 (0.625 ms), tx power int8 (dBm)
++ * 13 bytes = set all of them; they take effect at once (a connected client
++ * is asked for the new connection parameters) and are kept with 'save'.
++ * The power is rounded down to the radio's next step. No payload = only ask.
++ * Replies 'L' 'N' 'K' result, the 13 bytes as now set (4..16), then
++ * connected (17), and the interval u16 (18), latency u16 (20) and timeout
++ * u16 (22) the client granted. result 0 = ok, 0xf0 (-16) = payload too
++ * short, 0xff..0xfa (-1..-6) = ble_link_check() refused the values. */
++static uint8_t cfg_ble_link(uint8_t *val, uint16_t len)
++{
++	int8_t ret = 0;
++	if (len > 0 && len < 13) {
++		ret = -16;
++	} else if (len >= 13) {
++		/* byte by byte: over BLE val sits at an odd address */
++		ble_link_t c;
++		c.conn_min = val[0] | (val[1] << 8);
++		c.conn_max = val[2] | (val[3] << 8);
++		c.conn_latency = val[4] | (val[5] << 8);
++		c.conn_timeout = val[6] | (val[7] << 8);
++		c.adv_min = val[8] | (val[9] << 8);
++		c.adv_max = val[10] | (val[11] << 8);
++		c.tx_dbm = ble_tx_round((int8_t)val[12]);
++		ret = ble_link_check(&c);
++		if (ret == 0) {
++			badge_cfg.ble_link = c;
++			ble_link_changed();
++		}
++	}
++
++	uint8_t r[64] = { 'L', 'N', 'K', (uint8_t)ret };
++	uint16_t f[] = { badge_cfg.ble_link.conn_min, badge_cfg.ble_link.conn_max,
++	                 badge_cfg.ble_link.conn_latency, badge_cfg.ble_link.conn_timeout,
++	                 badge_cfg.ble_link.adv_min, badge_cfg.ble_link.adv_max };
++	for (int i = 0; i < 6; i++) {
++		r[4 + 2 * i] = f[i] & 0xff;
++		r[5 + 2 * i] = f[i] >> 8;
++	}
++	r[16] = (uint8_t)badge_cfg.ble_link.tx_dbm;
++	uint16_t iv = 0, lat = 0, to = 0;
++	r[17] = ble_link_info(&iv, &lat, &to);
++	r[18] = iv & 0xff; r[19] = iv >> 8;
++	r[20] = lat & 0xff; r[21] = lat >> 8;
++	r[22] = to & 0xff; r[23] = to >> 8;
++	ng_reply(r, sizeof(r));
++	return (uint8_t)ret;
++}
++
  uint8_t misc(uint8_t *val, uint16_t len)
  {
  	PRINT(__func__);
-@@ -170,6 +326,14 @@ uint8_t misc(uint8_t *val, uint16_t len)
+@@ -170,6 +377,15 @@ uint8_t misc(uint8_t *val, uint16_t len)
  	const uint8_t (*misc_cmd[])(uint8_t *, uint16_t) = {
  		cfg_splash_speed,
  		cfg_led_brightness,
@@ -2133,10 +2601,11 @@ index b5a687e..043e4d4 100644
 +		cfg_passkey,
 +		cfg_forget_bonds,
 +		cfg_show_slot,
++		cfg_ble_link,
  	};
  
  	uint8_t fn = val[0];
-@@ -194,6 +358,124 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
+@@ -194,6 +410,124 @@ const uint8_t (*cmd_lut[])(uint8_t *val, uint16_t len) = {
  
  #define CMD_LUT_LEN (sizeof(cmd_lut) / sizeof(cmd_lut[0]))
  

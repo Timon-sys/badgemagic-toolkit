@@ -28,6 +28,11 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.danger { color: var(--accent); }
 button.on { background: var(--accent-dim); border-color: var(--accent); }
 input[type=text] { width: 100%; min-width: 0; }
+input[type=number] { font: inherit; color: var(--text); background: #20232a; border: 1px solid var(--line);
+  border-radius: 8px; padding: 5px 6px; width: 76px; }
+details.linkbox { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
+details.linkbox summary { cursor: pointer; padding: 4px 0; }
+.linkrow { display: flex; gap: 6px; align-items: center; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .grow { flex: 1; }
 .pill { font-size: 12px; padding: 3px 9px; border-radius: 99px; background: #20232a; color: var(--dim); }
@@ -163,6 +168,28 @@ label.chk { display: inline-flex; gap: 4px; align-items: center; }
         <button id="btnPin" data-need="pin">Set</button><button id="btnPinRnd" data-need="pin">Random</button></div>
       <div class="set"><span class="hint" id="bondInfo"></span>
         <button id="btnForget" data-need="pin">Forget paired devices</button></div>
+      <details class="linkbox" id="linkBox">
+        <summary>Bluetooth link <span class="hint" id="linkHint"></span></summary>
+        <div class="set"><span>Preset</span><span class="seg" id="linkPreset">
+          <button data-v="fast" title="7.5 ms: fastest streaming, most battery while connected">fast</button><button
+            data-v="default" title="15-30 ms (Windows picks 30): the default">default</button><button
+            data-v="saver" title="50-100 ms: slow streaming, least battery while connected">saver</button></span></div>
+        <div class="set"><span>Connection interval <span class="hint">ms, 7.5-4000</span></span><span class="linkrow">
+          <input type="number" id="lkMin" min="7.5" max="4000" step="1.25"> &ndash;
+          <input type="number" id="lkMax" min="7.5" max="4000" step="1.25"></span></div>
+        <div class="set"><span>Latency <span class="hint">events it may skip</span></span>
+          <input type="number" id="lkLat" min="0" max="499" step="1"></div>
+        <div class="set"><span>Supervision timeout <span class="hint">s</span></span>
+          <input type="number" id="lkTo" min="0.1" max="32" step="0.1"></div>
+        <div class="set"><span>Advertising <span class="hint">ms, 20-10240</span></span><span class="linkrow">
+          <input type="number" id="lkAdvMin" min="20" max="10240" step="0.625"> &ndash;
+          <input type="number" id="lkAdvMax" min="20" max="10240" step="0.625"></span></div>
+        <div class="set"><span>Radio power</span><select id="lkTx"></select></div>
+        <div class="hint" id="linkGranted" style="padding: 6px 0 2px"></div>
+        <div class="row" style="justify-content: flex-end">
+          <button id="btnLinkDef" data-need="link">Defaults</button>
+          <button id="btnLink" data-need="link" class="primary">Apply</button></div>
+      </details>
     </section>
     <section class="card">
       <div id="showBox" hidden>
@@ -193,6 +220,15 @@ const CMD_POWER = 1, CMD_STREAM_SET = 2, CMD_STREAM_BM = 3, CMD_BLE = 4, CMD_SAV
 const MISC_SPLASH = 0, MISC_BRIGHTNESS = 1, MISC_TIME = 2, MISC_BATTERY = 3, MISC_STATUS = 4;
 const MISC_CHARGING = 5;  // firmware 1.3.0: charging screen seconds, 0 = off, 255 = until a button
 const MISC_SLOT = 9;  // firmware 1.5.0: show slot N now / which slots are filled
+// firmware 1.7.0: Bluetooth link settings, in Bluetooth units (intervals 1.25 ms,
+// timeout 10 ms, advertising 0.625 ms), see cfg_ble_link() in ngctrl.c
+const MISC_LINK = 10;
+const LINK_DEFAULT = { connMin: 12, connMax: 24, latency: 0, timeout: 400, advMin: 100, advMax: 200, txDbm: 6 };
+const LINK_PRESETS = { fast: [6, 6], default: [12, 24], saver: [40, 80] };
+const TX_LEVELS = [-16, -12, -8, -5, -3, -1, 0, 1, 2, 3, 4, 5, 6];
+const LINK_REFUSED = { 0xff: "connection interval out of range", 0xfe: "latency out of range",
+  0xfd: "timeout out of range", 0xfc: "timeout too short for that interval and latency",
+  0xfb: "advertising interval out of range", 0xfa: "bad radio power", 0xf0: "payload too short" };
 const MISC_SECURITY = 6, MISC_PIN = 7, MISC_FORGET_BONDS = 8;  // firmware 1.4.0, USB only
 const MODES = ["menu", "slots", "BT download", "clock", "game", "power off"];
 const SLOT_MODES = ["left", "right", "up", "down", "center", "fast", "drop", "curtain", "laser"];
@@ -313,7 +349,8 @@ const NG_NAMES = { 1: p => ["power off", "power ?", "reboot"][p[1]] || "power", 
   3: () => "live frame", 4: p => p[1] ? "ble name" : "ble always-on", 6: () => "save",
   8: p => ["splash", "brightness", "set time", "battery?", "status?", "charging scr",
            "security", p.length > 2 ? "set pin" : "pin?", "forget bonds",
-           p.length > 2 ? "show slot " + (p[2] + 1) : "slots?"][p[1]] || "misc" };
+           p.length > 2 ? "show slot " + (p[2] + 1) : "slots?",
+           p.length > 2 ? "set link" : "link?"][p[1]] || "misc" };
 const ngName = p => (NG_NAMES[p[0]] || (() => "cmd " + p[0]))(p);
 
 const traffic = {
@@ -383,6 +420,32 @@ async function chipTemp(l) {
   return { chipC: l.tempC };
 }
 
+// The 'LNK' reply: result at 3, the settings at 4-16, connected at 17, then the
+// interval, latency and timeout the client granted (18-23).
+function parseLink(r) {
+  const v = new DataView(r.buffer, r.byteOffset, r.byteLength);
+  return {
+    result: r[3] === 0 ? 0 : LINK_REFUSED[r[3]] || "refused (" + r[3] + ")",
+    link: { connMin: v.getUint16(4, true), connMax: v.getUint16(6, true), latency: v.getUint16(8, true),
+            timeout: v.getUint16(10, true), advMin: v.getUint16(12, true), advMax: v.getUint16(14, true),
+            txDbm: v.getInt8(16) },
+    granted: r[17] ? { interval: v.getUint16(18, true), latency: v.getUint16(20, true),
+                       timeout: v.getUint16(22, true) } : null };
+}
+// Link settings (firmware 1.7.0): asked once, never again on that link if there is
+// no answer; then at most every 5 s (l.linkAt = 0 asks at once).
+async function linkInfo(l) {
+  if (l.noLink) return {};
+  if (l.linkAt && Date.now() - l.linkAt < 5000) return l.linkLast;
+  let r;
+  try { r = await l.query([CMD_MISC, MISC_LINK], "LNK"); }
+  catch (e) { if (e.name !== "TimeoutError" || l.linkLast) throw e; l.noLink = true; return {}; }
+  const k = parseLink(r);
+  l.linkAt = Date.now();
+  l.linkLast = { link: k.link, granted: k.granted };
+  return l.linkLast;
+}
+
 class UsbLink {
   async ng(payload) {
     const p = Uint8Array.from(payload), f = new Uint8Array(4 + p.length);
@@ -414,7 +477,7 @@ class UsbLink {
   }
   async status() {
     return { ...parseStatus(await this.query([CMD_MISC, MISC_STATUS], "STA")), ...await this.pinInfo(),
-             ...await chipTemp(this) };
+             ...await chipTemp(this), ...await linkInfo(this) };
   }
   // slot 0-7: show it now; no slot: only ask. -> { result: 0 | "empty" | "busy", filled: [0-based] }
   // Throws TimeoutError on firmware before 1.5.0.
@@ -544,8 +607,9 @@ class BleLink {
     });
   }
   // f056 notifies the 1-byte ng status after each command (shows up as RX in the
-  // monitor) and, from firmware 1.5.0, the 64-byte replies: in one piece on fast-ble
-  // builds, in equal parts of 2+ bytes with a smaller MTU
+  // monitor) and, from firmware 1.5.0, the 64-byte replies: in one piece with an MTU
+  // of 67 or more (1.7.0, and the fastble builds before it), in equal parts of 2+
+  // bytes with a smaller MTU
   async _listen() {
     if (!this.ngc) return;
     const n = await withTimeout(this.ngc.service.getCharacteristic(U(0xf056)), 5000, "notify");
@@ -599,7 +663,7 @@ class BleLink {
       let s;
       try { s = parseStatus(await this.query([CMD_MISC, MISC_STATUS], "STA")); this.gotSta = true; }
       catch (e) { if (e.name !== "TimeoutError" || this.gotSta) throw e; this.noSta = true; }
-      if (s) return { ...s, ...await chipTemp(this) };
+      if (s) return { ...s, ...await chipTemp(this), ...await linkInfo(this) };
     }
     const s = { firmware: this.fw };
     if (this.batt) {
@@ -898,7 +962,87 @@ function refreshUi() {
   if (s.pin != null && document.activeElement !== $("pinIn")) $("pinIn").value = String(s.pin).padStart(6, "0");
   $("bondInfo").textContent = s.bonds == null ? "" : `${s.bonds} device${s.bonds === 1 ? "" : "s"} paired`;
   if (s.bleName && document.activeElement !== $("bleName")) $("bleName").value = s.bleName;
+  refreshLink(s);
 }
+
+const LINK_INPUTS = ["lkMin", "lkMax", "lkLat", "lkTo", "lkAdvMin", "lkAdvMax", "lkTx"];
+for (const d of TX_LEVELS) $("lkTx").add(new Option((d > 0 ? "+" : "") + d + " dBm", d));
+$("lkTx").value = LINK_DEFAULT.txDbm;
+let linkEdited = false;  // the fields hold something not applied yet: don't overwrite it
+LINK_INPUTS.forEach(id => $(id).addEventListener("input", () => { linkEdited = true; }));
+const fmt = x => String(+x.toFixed(3));
+
+function showLinkFields(k) {
+  $("lkMin").value = fmt(k.connMin * 1.25); $("lkMax").value = fmt(k.connMax * 1.25);
+  $("lkLat").value = k.latency; $("lkTo").value = fmt(k.timeout / 100);
+  $("lkAdvMin").value = fmt(k.advMin * 0.625); $("lkAdvMax").value = fmt(k.advMax * 0.625);
+  $("lkTx").value = k.txDbm;
+}
+function refreshLink(s) {
+  const ok = !!link && custom && !!s.link;
+  LINK_INPUTS.forEach(id => $(id).disabled = !ok);
+  document.querySelectorAll("[data-need=link], #linkPreset button").forEach(b => b.disabled = !ok);
+  $("linkHint").textContent = !link || ok ? "" : custom ? "(needs firmware 1.7.0)" : "";
+  if (!s.link) { $("linkGranted").textContent = ""; setSeg("linkPreset", null); return; }
+  if (!linkEdited) showLinkFields(s.link);
+  const p = Object.entries(LINK_PRESETS).find(([, v]) => v[0] === s.link.connMin && v[1] === s.link.connMax);
+  $("linkPreset").querySelectorAll("button").forEach(b => b.classList.toggle("on", !!p && b.dataset.v === p[0]));
+  const g = s.granted;
+  $("linkGranted").textContent = g
+    ? `connected now: ${fmt(g.interval * 1.25)} ms, latency ${g.latency}, timeout ${fmt(g.timeout / 100)} s`
+    : link && link.kind === "ble" ? "" : "nothing connected over Bluetooth";
+}
+
+// The fields in Bluetooth units, or an error text (the firmware's ble_link_check()).
+function readLinkFields() {
+  const units = (id, step) => {
+    const x = parseFloat($(id).value), u = Math.round(x / step);
+    if (!isFinite(x) || Math.abs(u * step - x) > 1e-6) throw `${$(id).value || "(empty)"} is not a multiple of ${step} ms`;
+    return u;
+  };
+  try {
+    const k = { connMin: units("lkMin", 1.25), connMax: units("lkMax", 1.25), latency: +$("lkLat").value,
+                timeout: Math.round(parseFloat($("lkTo").value) * 100),
+                advMin: units("lkAdvMin", 0.625), advMax: units("lkAdvMax", 0.625), txDbm: +$("lkTx").value };
+    if (!(6 <= k.connMin && k.connMin <= k.connMax && k.connMax <= 3200)) return "connection interval: 7.5 ms to 4 s, min not above max";
+    if (!(Number.isInteger(k.latency) && k.latency >= 0 && k.latency <= 499)) return "latency: 0 to 499";
+    if (!(k.timeout >= 10 && k.timeout <= 3200)) return "timeout: 0.1 to 32 s";
+    if (k.timeout * 4 <= (1 + k.latency) * k.connMax)
+      return `timeout must be longer than (1 + latency) x max interval x 2 = ${fmt((1 + k.latency) * k.connMax * 2.5 / 1000)} s`;
+    if (!(32 <= k.advMin && k.advMin <= k.advMax && k.advMax <= 16384)) return "advertising: 20 ms to 10.24 s, min not above max";
+    return k;
+  } catch (e) { return "interval: " + e; }
+}
+
+async function applyLink(k, label) {
+  const u16 = x => [x & 0xff, x >> 8];
+  const payload = [CMD_MISC, MISC_LINK, ...u16(k.connMin), ...u16(k.connMax), ...u16(k.latency),
+                   ...u16(k.timeout), ...u16(k.advMin), ...u16(k.advMax), k.txDbm & 0xff];
+  await run(label, async l => {
+    const r = parseLink(await l.query(payload, "LNK"));
+    if (r.result !== 0) { log("the badge refused it: " + r.result); return; }
+    await l.ng([CMD_SAVE]); await sleep(1000);
+    linkEdited = false;
+    l.linkAt = 0;  // ask again now: the client has answered the new interval by then
+    log(label + " saved");
+    try { status = await l.status(); } catch {}
+    refreshUi();
+  }).catch(() => {});
+}
+$("btnLink").onclick = () => {
+  const k = readLinkFields();
+  if (typeof k === "string") return log("Bluetooth link: " + k);
+  applyLink(k, `Bluetooth link ${fmt(k.connMin * 1.25)}-${fmt(k.connMax * 1.25)} ms`);
+};
+$("btnLinkDef").onclick = () => { showLinkFields(LINK_DEFAULT); applyLink(LINK_DEFAULT, "Bluetooth link defaults"); };
+$("linkPreset").onclick = e => {
+  const v = e.target.dataset.v;
+  if (!v || !status.link) return;
+  const k = { ...status.link, connMin: LINK_PRESETS[v][0], connMax: LINK_PRESETS[v][1] };
+  if (k.timeout * 4 <= (1 + k.latency) * k.connMax) k.timeout = LINK_DEFAULT.timeout;
+  showLinkFields(k);
+  applyLink(k, `Bluetooth link ${v}`);
+};
 
 function setSeg(id, v) { $(id).querySelectorAll("button").forEach(b => b.classList.toggle("on", v != null && +b.dataset.v === +v)); }
 
@@ -1351,8 +1495,9 @@ function drawLeds(canvas, frame, dimAll) {
 // Rough simulation of the slot animations: good enough to judge width and speed.
 // Widths arrive in 8-column blocks, so a picture that fills the display is 48
 // columns with 4 blank ones. The firmware's page_count() drops that last blank
-// part-page and get_x_offset() centres only a picture that fits in one page, so
-// follow both here, or the preview scrolls things the badge holds still.
+// part-page, and get_x_offset() centres anything that fits in one page by that
+// count (since 1.7.0; before, 48 stored columns were never centred), so follow
+// both here, or the preview scrolls things the badge holds still.
 const sim = {
   rows: null, slot: null, t: 0, last: 0,
   set(rows, slot) { this.rows = rows; this.slot = slot; this.t = 0; },
@@ -1364,7 +1509,7 @@ const sim = {
     return n - 1;
   },
   centerX() {
-    if (this.rows[0].length > COLS) return 0;   // more than one page: hard left
+    if (this.pages() > 1) return 0;   // more than one page: hard left
     let content = 0;
     for (let x = 0; x < this.rows[0].length; x++) if (this.lit(x)) content = x + 1;
     return content < COLS ? (COLS - content) >> 1 : 0;

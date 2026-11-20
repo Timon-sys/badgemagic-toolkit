@@ -46,7 +46,7 @@ async def main(a):
         print("connected, MTU", c.mtu_size, "| response:", not a.no_response,
               "| rate:", a.rate or "max")
         if a.no_response and "write-without-response" not in c.services.get_characteristic(NG_WRITE).properties:
-            print("this firmware doesn't accept writes without response on f057 (use a fastble build)")
+            print("this firmware doesn't accept writes without response on f057 (needs firmware 1.7.0, or a fastble build before it)")
             return
         await c.write_gatt_char(NG_WRITE, bytes([CMD_STREAM_SET, 0x00]), response=True)
         await asyncio.sleep(2.0)  # the badge asks for a faster interval 1 s after connecting
